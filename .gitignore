@@ -1,0 +1,72 @@
+# Directories de compilación y salida (Build & Output)
+/build/
+/build-*/
+/build_*/
+/out/
+/temp/
+/bin/
+/lib/
+/x64/
+/x86/
+/Debug/
+/Release/
+/RelWithDebInfo/
+/MinSizeRel/
+
+# Archivos generados por CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+install_manifest.txt
+
+# Dependencias y artefactos de vcpkg
+vcpkg_installed/
+vcpkg_packages/
+
+# Archivos de entorno Visual Studio / MSVC
+/.vs/
+*.user
+*.suo
+*.sln.docstates
+*.vcxproj.user
+*.idb
+*.pdb
+*.ilk
+*.ipdb
+*.iobj
+
+# Configuración de VS Code (conserva configuraciones útiles de workspace)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/c_cpp_properties.json
+
+# Compilados y binarios C/C++
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+*.exe
+*.exp
+*.pch
+*.res
+
+# Logs, artefactos de pruebas e IPMX (SDP y métricas)
+*.log
+*.tmp
+*.sdp
+memory_samples.csv
+
+# Archivos del sistema operativo
+[Dd]esktop.ini
+Thumbs.db
+.DS_Store
+ 

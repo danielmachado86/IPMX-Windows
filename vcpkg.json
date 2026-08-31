@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "ipmx-windows-phase0",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "x264",
+      "default-features": false,
+      "features": ["asm", "gpl"]
+    }
+  ],
+  "builtin-baseline": "118bba14b94bc040c098c0c15e63c142148c05ca"
+}

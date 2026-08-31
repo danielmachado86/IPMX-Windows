@@ -1,0 +1,34 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-msvc
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-msvc
+
+      - name: Test
+        shell: pwsh
+        run: ctest --preset windows-msvc
