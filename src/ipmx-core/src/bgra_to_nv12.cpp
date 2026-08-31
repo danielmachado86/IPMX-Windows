@@ -1,9 +1,10 @@
-#include "ipmx/phase0/bgra_to_nv12.hpp"
+#include "ipmx/bgra_to_nv12.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 namespace {
 
 [[nodiscard]] uint8_t clamp_byte(const int value) noexcept {
@@ -74,4 +75,5 @@ Nv12Frame bgra_to_nv12(const BgraFrame& source) {
   return result;
 }
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

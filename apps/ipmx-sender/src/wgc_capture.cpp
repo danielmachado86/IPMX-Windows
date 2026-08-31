@@ -11,13 +11,14 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/base.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 
-namespace phase0 {
+namespace ipmx::sender {
 namespace {
 
 using namespace winrt::Windows::Graphics;
@@ -27,7 +28,12 @@ using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 
 class PrimaryMonitorSource final : public FrameSource {
 public:
-  PrimaryMonitorSource() {
+  PrimaryMonitorSource(const uint32_t fps_numerator, const uint32_t fps_denominator) {
+    if (fps_numerator == 0U || fps_denominator == 0U) {
+      throw std::invalid_argument("invalid WGC frame rate");
+    }
+    frame_period_ = std::chrono::nanoseconds(
+        std::max<uint64_t>(1U, 1'000'000'000ULL * fps_denominator / fps_numerator));
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     if (!GraphicsCaptureSession::IsSupported()) {
       throw std::runtime_error("Windows Graphics Capture is not supported on this system");
@@ -86,16 +92,42 @@ public:
 
   bool next(BgraFrame& frame) override {
     std::unique_lock lock(mutex_);
-    if (!ready_.wait_for(lock, std::chrono::seconds(2), [this] { return latest_.has_value(); })) {
+    if (!have_frame_ &&
+        !ready_.wait_for(lock, std::chrono::seconds(2), [this] { return latest_.has_value(); })) {
       return false;
     }
-    frame = std::move(*latest_);
-    latest_.reset();
+
+    if (!schedule_initialized_) {
+      next_deadline_ = std::chrono::steady_clock::now();
+      schedule_initialized_ = true;
+    }
+    while (std::chrono::steady_clock::now() < next_deadline_) {
+      ready_.wait_until(lock, next_deadline_);
+    }
+
+    if (latest_) {
+      frame = std::move(*latest_);
+      latest_.reset();
+      have_frame_ = true;
+    } else {
+      frame = BgraFrame{};
+      frame.width = width_;
+      frame.height = height_;
+      frame.stride = width_ * 4U;
+      frame.capture_time_ns = steady_now_ns();
+      frame.repeated = true;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    do {
+      next_deadline_ += frame_period_;
+    } while (next_deadline_ <= now);
     return true;
   }
 
 private:
   void on_frame(const Direct3D11CaptureFramePool& pool) noexcept {
+    bool staging_mapped = false;
     try {
       const auto frame = pool.TryGetNextFrame();
       if (!frame) {
@@ -122,6 +154,7 @@ private:
       context_->CopyResource(staging_.get(), texture.get());
       D3D11_MAPPED_SUBRESOURCE mapped{};
       winrt::check_hresult(context_->Map(staging_.get(), 0U, D3D11_MAP_READ, 0U, &mapped));
+      staging_mapped = true;
 
       BgraFrame output;
       output.width = std::min(width_, description.Width & ~1U);
@@ -137,6 +170,7 @@ private:
                     output.stride);
       }
       context_->Unmap(staging_.get(), 0U);
+      staging_mapped = false;
 
       {
         std::lock_guard lock(mutex_);
@@ -144,7 +178,7 @@ private:
       }
       ready_.notify_one();
     } catch (...) {
-      if (staging_) {
+      if (staging_mapped) {
         context_->Unmap(staging_.get(), 0U);
       }
     }
@@ -165,12 +199,17 @@ private:
   std::mutex mutex_;
   std::condition_variable ready_;
   std::optional<BgraFrame> latest_;
+  std::chrono::nanoseconds frame_period_{};
+  std::chrono::steady_clock::time_point next_deadline_{};
+  bool schedule_initialized_{};
+  bool have_frame_{};
 };
 
 } // namespace
 
-std::unique_ptr<FrameSource> make_primary_monitor_source() {
-  return std::make_unique<PrimaryMonitorSource>();
+std::unique_ptr<FrameSource> make_primary_monitor_source(const uint32_t fps_numerator,
+                                                         const uint32_t fps_denominator) {
+  return std::make_unique<PrimaryMonitorSource>(fps_numerator, fps_denominator);
 }
 
-} // namespace phase0
+} // namespace ipmx::sender

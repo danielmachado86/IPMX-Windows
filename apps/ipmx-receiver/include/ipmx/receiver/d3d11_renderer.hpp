@@ -1,11 +1,11 @@
 #pragma once
 
-#include "ipmx/phase0/types.hpp"
+#include "ipmx/types.hpp"
 
 #include <cstdint>
 #include <memory>
 
-namespace phase0 {
+namespace ipmx::receiver {
 
 class D3d11Renderer {
 public:
@@ -22,4 +22,4 @@ private:
   std::unique_ptr<State> state_;
 };
 
-} // namespace phase0
+} // namespace ipmx::receiver

@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <thread>
 
-namespace phase0 {
+namespace ipmx::sender {
 namespace {
 
 class TestPatternSource final : public FrameSource {
@@ -74,4 +74,4 @@ std::unique_ptr<FrameSource> make_test_pattern_source(const uint32_t width, cons
   return std::make_unique<TestPatternSource>(width, height, fps_numerator, fps_denominator);
 }
 
-} // namespace phase0
+} // namespace ipmx::sender

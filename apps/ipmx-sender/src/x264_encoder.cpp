@@ -2,13 +2,20 @@
 
 #include <x264.h>
 
+#include <algorithm>
 #include <stdexcept>
 
-namespace phase0 {
+namespace ipmx::sender {
 
 struct X264Encoder::State {
   x264_t* encoder{};
   EncoderSettings settings{};
+
+  ~State() {
+    if (encoder) {
+      x264_encoder_close(encoder);
+    }
+  }
 };
 
 namespace {
@@ -46,14 +53,18 @@ X264Encoder::X264Encoder(const EncoderSettings& settings) : state_(std::make_uni
   parameters.i_timebase_den = settings.fps_numerator;
   parameters.b_vfr_input = 0;
   parameters.i_bframe = 0;
-  parameters.i_keyint_max = static_cast<int>(settings.fps_numerator * 2U / settings.fps_denominator);
-  parameters.i_keyint_min = parameters.i_keyint_max;
+  parameters.i_keyint_max = std::max(1, static_cast<int>(settings.fps_numerator /
+                                                         settings.fps_denominator));
+  parameters.i_keyint_min = 1;
   parameters.b_repeat_headers = 1;
   parameters.b_annexb = 1;
   parameters.rc.i_rc_method = X264_RC_ABR;
   parameters.rc.i_bitrate = static_cast<int>(settings.target_bitrate_kbps);
   parameters.rc.i_vbv_max_bitrate = static_cast<int>(settings.target_bitrate_kbps);
-  parameters.rc.i_vbv_buffer_size = static_cast<int>(settings.target_bitrate_kbps);
+  parameters.rc.i_vbv_buffer_size = std::max(
+      1, static_cast<int>((static_cast<uint64_t>(settings.target_bitrate_kbps) *
+                           settings.fps_denominator + settings.fps_numerator - 1U) /
+                          settings.fps_numerator));
   parameters.vui.i_sar_width = 1;
   parameters.vui.i_sar_height = 1;
   if (x264_param_apply_profile(&parameters, "high") != 0) {
@@ -81,11 +92,7 @@ X264Encoder::X264Encoder(const EncoderSettings& settings) : state_(std::make_uni
   }
 }
 
-X264Encoder::~X264Encoder() {
-  if (state_ && state_->encoder) {
-    x264_encoder_close(state_->encoder);
-  }
-}
+X264Encoder::~X264Encoder() = default;
 
 EncodedAccessUnit X264Encoder::encode(const Nv12Frame& frame, const int64_t pts) {
   if (frame.width != state_->settings.width || frame.height != state_->settings.height) {
@@ -115,4 +122,4 @@ EncodedAccessUnit X264Encoder::encode(const Nv12Frame& frame, const int64_t pts)
   return access_unit;
 }
 
-} // namespace phase0
+} // namespace ipmx::sender

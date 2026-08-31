@@ -5,7 +5,8 @@
 #include <cstdint>
 #include <limits>
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 
 class LatencyMetrics {
 public:
@@ -35,4 +36,5 @@ private:
   double squared_delta_{};
 };
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

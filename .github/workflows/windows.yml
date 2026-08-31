@@ -2,7 +2,7 @@ name: Windows
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 permissions:
@@ -16,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LOCALAPPDATA }}\vcpkg\archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
       - name: Configure MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -23,7 +29,13 @@ jobs:
 
       - name: Configure
         shell: pwsh
-        run: cmake --preset windows-msvc
+        run: cmake --preset windows-msvc -DIPMX_WARNINGS_AS_ERRORS=ON -DIPMX_ENABLE_CLANG_TIDY=ON
+
+      - name: Verify formatting
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem apps,src,tests -Recurse -File -Include *.cpp,*.hpp
+          clang-format --dry-run --Werror $files.FullName
 
       - name: Build
         shell: pwsh

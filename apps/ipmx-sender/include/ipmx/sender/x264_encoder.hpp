@@ -1,13 +1,13 @@
 #pragma once
 
-#include "ipmx/phase0/annexb.hpp"
-#include "ipmx/phase0/types.hpp"
+#include "ipmx/annexb.hpp"
+#include "ipmx/types.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-namespace phase0 {
+namespace ipmx::sender {
 
 struct EncoderSettings {
   uint32_t width{};
@@ -41,4 +41,4 @@ private:
   NalUnit pps_;
 };
 
-} // namespace phase0
+} // namespace ipmx::sender

@@ -1,4 +1,4 @@
-add_executable(ipmx_core_tests phase0_tests.cpp)
+add_executable(ipmx_core_tests core_tests.cpp)
 target_link_libraries(ipmx_core_tests PRIVATE
   ipmx::core
   ipmx::project_options

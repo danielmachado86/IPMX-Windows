@@ -1,13 +1,13 @@
 #pragma once
 
-#include "ipmx/phase0/types.hpp"
+#include "ipmx/types.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
 
-namespace phase0 {
+namespace ipmx::receiver {
 
 class MfH264Decoder {
 public:
@@ -24,4 +24,4 @@ private:
   std::unique_ptr<State> state_;
 };
 
-} // namespace phase0
+} // namespace ipmx::receiver

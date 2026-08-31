@@ -1,4 +1,5 @@
-#include "ipmx/phase0/sdp.hpp"
+#include "ipmx/sdp.hpp"
+#include "ipmx/rtp.hpp"
 
 #include <cmath>
 #include <fstream>
@@ -9,7 +10,8 @@
 #include <stdexcept>
 #include <string_view>
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 namespace {
 
 [[nodiscard]] std::string base64(const std::span<const uint8_t> input) {
@@ -44,14 +46,14 @@ namespace {
 
 } // namespace
 
-std::string make_phase0_sdp(const SdpSettings& settings, const NalUnit& sps, const NalUnit& pps) {
+std::string make_sdp(const SdpSettings& settings, const NalUnit& sps, const NalUnit& pps) {
   if (settings.fps_numerator == 0U || settings.fps_denominator == 0U) {
     throw std::invalid_argument("invalid SDP frame rate");
   }
   std::ostringstream sdp;
   sdp << "v=0\r\n"
       << "o=- 0 0 IN IP4 127.0.0.1\r\n"
-      << "s=IPMX Windows Phase 0 H.264 loopback\r\n"
+      << "s=IPMX Windows H.264 loopback\r\n"
       << "c=IN IP4 " << settings.multicast_group << "/1\r\n"
       << "t=0 0\r\n"
       << "m=video " << settings.port << " RTP/AVP " << static_cast<unsigned>(settings.payload_type)
@@ -65,24 +67,25 @@ std::string make_phase0_sdp(const SdpSettings& settings, const NalUnit& sps, con
       << static_cast<double>(settings.fps_numerator) / settings.fps_denominator << "\r\n"
       << "a=framesize:" << static_cast<unsigned>(settings.payload_type) << ' '
       << settings.width << '-' << settings.height << "\r\n"
-      << "a=extmap:1 urn:ipmx-windows:phase0:capture-time-ns\r\n"
+      << "a=extmap:" << static_cast<unsigned>(kCaptureTimeExtensionId) << ' '
+      << kCaptureTimeExtensionUri << "\r\n"
       << "a=sendonly\r\n";
   return sdp.str();
 }
 
-void write_phase0_sdp(const std::filesystem::path& path, const SdpSettings& settings,
-                      const NalUnit& sps, const NalUnit& pps) {
+void write_sdp(const std::filesystem::path& path, const SdpSettings& settings,
+               const NalUnit& sps, const NalUnit& pps) {
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   if (!output) {
     throw std::runtime_error("cannot create SDP file");
   }
-  output << make_phase0_sdp(settings, sps, pps);
+  output << make_sdp(settings, sps, pps);
   if (!output) {
     throw std::runtime_error("cannot write SDP file");
   }
 }
 
-SdpSettings read_phase0_sdp(const std::filesystem::path& path) {
+SdpSettings read_sdp(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     throw std::runtime_error("cannot open SDP file");
@@ -131,4 +134,5 @@ SdpSettings read_phase0_sdp(const std::filesystem::path& path) {
   return settings;
 }
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

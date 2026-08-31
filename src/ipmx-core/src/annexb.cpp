@@ -1,6 +1,7 @@
-#include "ipmx/phase0/annexb.hpp"
+#include "ipmx/annexb.hpp"
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 namespace {
 
 struct StartCode {
@@ -69,4 +70,5 @@ std::vector<uint8_t> build_annex_b(const std::vector<NalUnit>& nals) {
   return result;
 }
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

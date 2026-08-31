@@ -18,7 +18,7 @@ $senderPath = (Resolve-Path -LiteralPath (Join-Path $resolvedBuild "bin\ipmx-sen
 $receiverPath = (Resolve-Path -LiteralPath (Join-Path $resolvedBuild "bin\ipmx-receiver.exe")).Path
 $sessionDirectory = Join-Path $resolvedBuild "loopback"
 New-Item -ItemType Directory -Path $sessionDirectory -Force | Out-Null
-$sdpPath = Join-Path $sessionDirectory "phase0.sdp"
+$sdpPath = Join-Path $sessionDirectory "ipmx.sdp"
 
 $senderArguments = @("--source", $Source, "--sdp", $sdpPath)
 if ($DurationSeconds -gt 0) {

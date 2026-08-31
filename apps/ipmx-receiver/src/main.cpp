@@ -1,12 +1,13 @@
-#include "ipmx/phase0/metrics.hpp"
-#include "ipmx/phase0/rtp.hpp"
-#include "ipmx/phase0/sdp.hpp"
-#include "ipmx/phase0/udp_multicast.hpp"
+#include "ipmx/metrics.hpp"
+#include "ipmx/rtp.hpp"
+#include "ipmx/sdp.hpp"
+#include "ipmx/udp_multicast.hpp"
 #include "ipmx/receiver/d3d11_renderer.hpp"
 #include "ipmx/receiver/mf_h264_decoder.hpp"
 
 #include <windows.h>
 
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -38,6 +39,7 @@ struct Options {
   uint32_t fps_numerator{60U};
   uint32_t fps_denominator{1U};
   uint32_t duration_seconds{};
+  uint32_t maximum_latency_ms{250U};
   bool require_zero_loss{};
   std::filesystem::path sdp;
 };
@@ -58,7 +60,7 @@ template <typename T>
   for (int index = 1; index + 1 < argc; ++index) {
     if (std::string_view(argv[index]) == "--sdp") {
       options.sdp = argv[index + 1];
-      const auto settings = phase0::read_phase0_sdp(options.sdp);
+      const auto settings = ipmx::read_sdp(options.sdp);
       options.group = settings.multicast_group;
       options.port = settings.port;
       options.width = settings.width;
@@ -73,7 +75,7 @@ template <typename T>
     if (key == "--help") {
       std::cout << "ipmx-receiver [--width N] [--height N] [--fps N] [--group A.B.C.D] "
                    "[--port N] [--interface A.B.C.D] [--sdp PATH] [--duration-seconds N] "
-                   "[--require-zero-loss]\n";
+                   "[--max-latency-ms N] [--require-zero-loss]\n";
       std::exit(0);
     }
     if (key == "--require-zero-loss") {
@@ -87,23 +89,31 @@ template <typename T>
     if (key == "--sdp") options.sdp = value;
     else if (key == "--width") options.width = parse_number<uint32_t>(value, "--width");
     else if (key == "--height") options.height = parse_number<uint32_t>(value, "--height");
-    else if (key == "--fps") options.fps_numerator = parse_number<uint32_t>(value, "--fps");
+    else if (key == "--fps") {
+      options.fps_numerator = parse_number<uint32_t>(value, "--fps");
+      options.fps_denominator = 1U;
+    }
     else if (key == "--group") options.group = value;
     else if (key == "--port") options.port = parse_number<uint16_t>(value, "--port");
     else if (key == "--interface") options.interface_address = value;
     else if (key == "--duration-seconds") options.duration_seconds = parse_number<uint32_t>(value, "--duration-seconds");
+    else if (key == "--max-latency-ms") options.maximum_latency_ms = parse_number<uint32_t>(value, "--max-latency-ms");
     else throw std::invalid_argument("unknown option: " + std::string(key));
+  }
+  if (options.maximum_latency_ms == 0U) {
+    throw std::invalid_argument("--max-latency-ms must be greater than zero");
   }
   return options;
 }
 
-void print_stats(const phase0::SequenceStats& sequence, const uint64_t access_units,
-                 const uint64_t decoded_frames, const uint64_t invalid_packets,
-                 const phase0::LatencyMetrics& latency) {
+void print_stats(const ipmx::SequenceStats& sequence, const uint64_t access_units,
+                 const uint64_t decoded_frames, const uint64_t late_frames,
+                 const uint64_t invalid_packets,
+                 const ipmx::LatencyMetrics& latency) {
   std::cout << std::fixed << std::setprecision(3)
             << "packets=" << sequence.received << " loss=" << sequence.lost
             << " reordered=" << sequence.reordered << " invalid=" << invalid_packets
-            << " AUs=" << access_units << " frames=" << decoded_frames
+            << " AUs=" << access_units << " frames=" << decoded_frames << " late=" << late_frames
             << " latency_ms(mean/min/max/stddev)=" << latency.mean_ms() << '/'
             << latency.minimum_ms() << '/' << latency.maximum_ms() << '/'
             << latency.standard_deviation_ms() << '\n';
@@ -115,18 +125,21 @@ int main(const int argc, char** argv) {
   try {
     const Options options = parse_options(argc, argv);
     SetConsoleCtrlHandler(stop_handler, TRUE);
-    phase0::MulticastReceiver network(options.group, options.port, options.interface_address);
-    phase0::MfH264Decoder decoder(options.width, options.height,
-                                  options.fps_numerator, options.fps_denominator);
-    phase0::D3d11Renderer renderer(options.width, options.height);
-    phase0::SequenceTracker sequence;
-    phase0::H264Depacketizer depacketizer;
-    phase0::LatencyMetrics latency;
+    ipmx::MulticastReceiver network(options.group, options.port, options.interface_address);
+    ipmx::receiver::MfH264Decoder decoder(options.width, options.height,
+                                          options.fps_numerator, options.fps_denominator);
+    ipmx::receiver::D3d11Renderer renderer(options.width, options.height);
+    ipmx::SequenceTracker sequence;
+    ipmx::H264Depacketizer depacketizer;
+    ipmx::LatencyMetrics latency;
 
     uint64_t invalid_packets = 0U;
     uint64_t access_units = 0U;
     uint64_t decoded_frames = 0U;
-    std::vector<uint8_t> datagram;
+    uint64_t late_frames = 0U;
+    std::array<uint8_t, ipmx::kMaximumUdpDatagramBytes> datagram{};
+    const uint64_t maximum_latency_ns =
+        static_cast<uint64_t>(options.maximum_latency_ms) * 1'000'000ULL;
     const auto started = std::chrono::steady_clock::now();
     auto last_report = started;
     std::cout << "Receiver: " << options.group << ':' << options.port << " -> "
@@ -138,9 +151,10 @@ int main(const int argc, char** argv) {
           now - started >= std::chrono::seconds(options.duration_seconds)) {
         break;
       }
-      if (network.receive(datagram, 10)) {
-        const auto packet = phase0::parse_rtp_packet(datagram);
-        if (!packet || packet->payload_type != phase0::kH264PayloadType) {
+      if (const auto received = network.receive(datagram, 10)) {
+        const auto packet = ipmx::parse_rtp_packet(
+            std::span<const uint8_t>(datagram.data(), *received));
+        if (!packet || packet->payload_type != ipmx::kH264PayloadType) {
           ++invalid_packets;
         } else {
           sequence.observe(packet->sequence);
@@ -148,6 +162,12 @@ int main(const int argc, char** argv) {
             ++access_units;
             for (const auto& frame : decoder.decode(access_unit->annex_b,
                                                      access_unit->capture_time_ns)) {
+              const uint64_t ready_time = ipmx::steady_now_ns();
+              if (frame.capture_time_ns != 0U && ready_time >= frame.capture_time_ns &&
+                  ready_time - frame.capture_time_ns > maximum_latency_ns) {
+                ++late_frames;
+                continue;
+              }
               const uint64_t presented = renderer.present(frame);
               if (frame.capture_time_ns != 0U && presented >= frame.capture_time_ns) {
                 latency.observe_ns(presented - frame.capture_time_ns);
@@ -158,14 +178,18 @@ int main(const int argc, char** argv) {
         }
       }
       if (now - last_report >= std::chrono::seconds(1)) {
-        print_stats(sequence.stats(), access_units, decoded_frames, invalid_packets, latency);
+        print_stats(sequence.stats(), access_units, decoded_frames, late_frames, invalid_packets,
+                    latency);
         last_report = now;
       }
     }
 
-    print_stats(sequence.stats(), access_units, decoded_frames, invalid_packets, latency);
+    print_stats(sequence.stats(), access_units, decoded_frames, late_frames, invalid_packets,
+                latency);
     const bool clean = sequence.stats().lost == 0U && sequence.stats().reordered == 0U &&
-                       invalid_packets == 0U && decoded_frames > 0U && latency.count() > 0U;
+                       invalid_packets == 0U && late_frames == 0U && decoded_frames > 0U &&
+                       latency.count() > 0U &&
+                       latency.maximum_ms() <= static_cast<double>(options.maximum_latency_ms);
     std::cout << "Receiver stopped: " << (clean ? "PASS" : "FAIL") << '\n';
     return options.require_zero_loss && !clean ? 2 : 0;
   } catch (const std::exception& error) {

@@ -13,7 +13,15 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 1024)]
-    [double]$MaximumGrowthMiB = 5.0
+    [double]$MaximumGrowthMiB = 5.0,
+
+    [Parameter()]
+    [ValidateRange(0, 600)]
+    [int]$WarmupSeconds = 60,
+
+    [Parameter()]
+    [ValidateRange(1, 10000)]
+    [int]$MaximumLatencyMs = 250
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,14 +33,15 @@ if (-not $senderPath.StartsWith($resolvedBuild, [System.StringComparison]::Ordin
     throw "Resolved executable escaped the requested build directory."
 }
 
-$outputDirectory = Join-Path $resolvedBuild "stability"
+$runId = (Get-Date -Format "yyyyMMdd-HHmmss") + "-$Source-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
+$outputDirectory = Join-Path (Join-Path $resolvedBuild "stability") $runId
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 $receiverLog = Join-Path $outputDirectory "receiver.log"
 $receiverError = Join-Path $outputDirectory "receiver.err.log"
 $senderLog = Join-Path $outputDirectory "sender.log"
 $senderError = Join-Path $outputDirectory "sender.err.log"
 $samplesPath = Join-Path $outputDirectory "memory_samples.csv"
-$sdpPath = Join-Path $outputDirectory ("phase0-" + [guid]::NewGuid().ToString("N") + ".sdp")
+$sdpPath = Join-Path $outputDirectory ("ipmx-" + [guid]::NewGuid().ToString("N") + ".sdp")
 
 $receiver = $null
 $sender = $null
@@ -53,6 +62,7 @@ try {
     $receiverArguments = @(
         "--sdp", $sdpPath,
         "--duration-seconds", ($DurationSeconds + 5),
+        "--max-latency-ms", $MaximumLatencyMs,
         "--require-zero-loss"
     )
     $receiver = Start-Process -FilePath $receiverPath -ArgumentList $receiverArguments `
@@ -77,22 +87,28 @@ try {
     $receiver.WaitForExit()
     $samples | Export-Csv -LiteralPath $samplesPath -NoTypeInformation
 
-    if ($samples.Count -lt 20) {
-        throw "Not enough memory samples were collected."
+    $effectiveWarmup = [math]::Min($WarmupSeconds, [math]::Floor($DurationSeconds / 5))
+    $steadySamples = @($samples | Where-Object { $_.Second -ge $effectiveWarmup })
+    $senderGrowth = [double]::NaN
+    $receiverGrowth = [double]::NaN
+    $memoryPassed = $false
+    if ($steadySamples.Count -ge 20) {
+        $window = [math]::Min(60, [math]::Floor($steadySamples.Count / 3))
+        $first = $steadySamples | Select-Object -First $window
+        $last = $steadySamples | Select-Object -Last $window
+        $senderGrowth = ($last | Measure-Object SenderWorkingSetMiB -Average).Average -
+                        ($first | Measure-Object SenderWorkingSetMiB -Average).Average
+        $receiverGrowth = ($last | Measure-Object ReceiverWorkingSetMiB -Average).Average -
+                          ($first | Measure-Object ReceiverWorkingSetMiB -Average).Average
+        $memoryPassed = $senderGrowth -le $MaximumGrowthMiB -and
+                        $receiverGrowth -le $MaximumGrowthMiB
     }
-    $window = [math]::Min(60, [math]::Floor($samples.Count / 3))
-    $first = $samples | Select-Object -First $window
-    $last = $samples | Select-Object -Last $window
-    $senderGrowth = ($last | Measure-Object SenderWorkingSetMiB -Average).Average -
-                    ($first | Measure-Object SenderWorkingSetMiB -Average).Average
-    $receiverGrowth = ($last | Measure-Object ReceiverWorkingSetMiB -Average).Average -
-                      ($first | Measure-Object ReceiverWorkingSetMiB -Average).Average
     $receiverText = Get-Content -LiteralPath $receiverLog -Raw
     $transportPassed = $receiver.ExitCode -eq 0 -and $receiverText.Contains("Receiver stopped: PASS")
-    $memoryPassed = $senderGrowth -le $MaximumGrowthMiB -and $receiverGrowth -le $MaximumGrowthMiB
 
     [pscustomobject]@{
         DurationSeconds = $DurationSeconds
+        WarmupSeconds = $effectiveWarmup
         Samples = $samples.Count
         SenderExitCode = $sender.ExitCode
         ReceiverExitCode = $receiver.ExitCode
@@ -101,6 +117,7 @@ try {
         TransportPassed = $transportPassed
         MemoryPassed = $memoryPassed
         Overall = $transportPassed -and $memoryPassed
+        OutputDirectory = $outputDirectory
     } | Format-List
 
     if (-not ($transportPassed -and $memoryPassed)) {

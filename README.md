@@ -33,9 +33,11 @@ transportable y comprobable mediante pruebas unitarias. `ipmx_sender` y `ipmx_re
 adaptadores Windows y sus headers no forman parte de la API instalada. x264 se enlaza únicamente al
 emisor.
 
-Los headers públicos usan el prefijo `ipmx/phase0` para evitar colisiones y dejar explícito que el
-contrato pertenece todavía al prototipo. Una fase posterior podrá promover componentes estables
-fuera de ese espacio sin modificar la estructura física completa.
+Los headers públicos se incluyen desde `ipmx/<componente>.hpp`. El núcleo vive en `namespace ipmx`
+con `inline namespace v0`: los consumidores escriben `ipmx::RtpPacketizer`, mientras que
+`ipmx::v0::RtpPacketizer` conserva una versión ABI explícita durante la evolución del prototipo.
+Los adaptadores específicos de las aplicaciones viven en `ipmx::sender` e `ipmx::receiver` y no
+forman parte de la API instalada.
 
 La dirección permitida de las dependencias es:
 
@@ -112,8 +114,8 @@ También se pueden iniciar manualmente. Arranque primero el emisor para producir
 receptor:
 
 ```powershell
-./out/build/windows-msvc/bin/ipmx-sender.exe --source test --sdp phase0.sdp
-./out/build/windows-msvc/bin/ipmx-receiver.exe --sdp phase0.sdp --require-zero-loss
+./out/build/windows-msvc/bin/ipmx-sender.exe --source test --sdp ipmx.sdp
+./out/build/windows-msvc/bin/ipmx-receiver.exe --sdp ipmx.sdp --require-zero-loss
 ```
 
 Use `--interface A.B.C.D` en ambos procesos si Windows elige una interfaz multicast distinta. El
@@ -148,8 +150,9 @@ como un nodo IPMX conforme.
 - Cuadros progresivos y dimensiones pares.
 - Conversión BGRA a NV12 con coeficientes BT.709 y rango de estudio.
 - x264 `veryfast` y `zerolatency`, High Profile, entrada NV12 de 8 bits e `i_bframe=0`.
-- GOP cerrado por IDR cada dos segundos y SPS/PPS repetidos en banda.
-- ABR con VBV de un segundo. Esta fase no implementa el modelo HRD/IPMX ni shaping.
+- GOP con IDR como máximo cada segundo y SPS/PPS repetidos en banda.
+- ABR con VBV aproximado de un cuadro para evitar ráfagas de un segundo. Esta fase no implementa
+  todavía el modelo HRD/IPMX ni shaping.
 - WGC captura el monitor primario, excluye el cursor y conserva únicamente el cuadro más reciente,
   evitando que una sobrecarga genere una cola de latencia creciente.
 
@@ -177,7 +180,7 @@ receptor puede calcular la diferencia inmediatamente después de `IDXGISwapChain
 El SDP declara la extensión como:
 
 ```text
-a=extmap:1 urn:ipmx-windows:phase0:capture-time-ns
+a=extmap:1 urn:ipmx-windows:rtp-hdrext:capture-time-ns
 ```
 
 Esta extensión es diagnóstica y privada; no forma parte de IPMX. Una fase posterior deberá
@@ -201,12 +204,15 @@ El receptor informa cada segundo:
 - access units reconstruidos y cuadros presentados;
 - latencia media, mínima, máxima y desviación estándar.
 
-`--require-zero-loss` retorna código 2 si hay pérdida, reordenamiento o paquetes inválidos, si no se
-presentó ningún cuadro o si no existe una muestra válida de latencia.
+`--require-zero-loss` retorna código 2 si hay pérdida, reordenamiento, paquetes inválidos o cuadros
+descartados por tardíos; también falla si no se presentó ningún cuadro, no existe una muestra válida
+de latencia o la latencia máxima supera `--max-latency-ms` (250 ms de forma predeterminada).
 
-`scripts/run-stability.ps1` compara la media de las primeras y últimas ventanas de hasta 60 muestras
-de memoria. El límite predeterminado de crecimiento es 5 MiB por proceso y puede cambiarse con
-`-MaximumGrowthMiB`.
+`scripts/run-stability.ps1` excluye un calentamiento inicial y compara la media de las primeras y
+últimas ventanas posteriores de hasta 60 muestras. El límite predeterminado de crecimiento es 5 MiB
+por proceso y puede cambiarse con `-MaximumGrowthMiB`; el calentamiento se controla mediante
+`-WarmupSeconds`. Cada ejecución conserva logs, SDP y CSV en un subdirectorio único bajo
+`out/build/windows-msvc/stability`.
 
 ### Exclusiones conscientes
 

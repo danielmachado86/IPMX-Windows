@@ -5,13 +5,15 @@
 #include <cstdint>
 #include <vector>
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 
 struct BgraFrame {
   uint32_t width{};
   uint32_t height{};
   uint32_t stride{};
   uint64_t capture_time_ns{};
+  bool repeated{};
   std::vector<uint8_t> pixels;
 };
 
@@ -47,4 +49,5 @@ struct DecodedFrame {
   return static_cast<uint64_t>(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

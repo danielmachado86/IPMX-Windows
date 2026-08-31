@@ -1,12 +1,17 @@
-#include "ipmx/phase0/rtp.hpp"
+#include "ipmx/rtp.hpp"
 
 #include <algorithm>
 #include <limits>
 #include <random>
 #include <stdexcept>
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 namespace {
+
+constexpr size_t kMaximumNalBytes = 8U * 1024U * 1024U;
+constexpr size_t kMaximumAccessUnitBytes = 16U * 1024U * 1024U;
+constexpr size_t kMaximumNalsPerAccessUnit = 256U;
 
 void write_u16(std::vector<uint8_t>& bytes, const size_t offset, const uint16_t value) {
   bytes[offset] = static_cast<uint8_t>(value >> 8U);
@@ -201,6 +206,7 @@ void H264Depacketizer::start_timestamp(const uint32_t timestamp, const uint64_t 
   damaged_ = false;
   timestamp_ = timestamp;
   capture_time_ns_ = capture_time_ns;
+  accumulated_bytes_ = 0U;
   nals_.clear();
   fragment_.clear();
 }
@@ -209,6 +215,7 @@ void H264Depacketizer::reset() noexcept {
   active_ = false;
   fragmented_ = false;
   damaged_ = false;
+  accumulated_bytes_ = 0U;
   nals_.clear();
   fragment_.clear();
 }
@@ -236,22 +243,49 @@ std::optional<CompletedAccessUnit> H264Depacketizer::push(const ParsedRtpPacket&
       fragment_.clear();
       fragmented_ = false;
     }
-    nals_.emplace_back(packet.payload.begin(), packet.payload.end());
+    if (packet.payload.size() > kMaximumNalBytes || nals_.size() >= kMaximumNalsPerAccessUnit ||
+        accumulated_bytes_ > kMaximumAccessUnitBytes - packet.payload.size()) {
+      damaged_ = true;
+    } else {
+      nals_.emplace_back(packet.payload.begin(), packet.payload.end());
+      accumulated_bytes_ += packet.payload.size();
+    }
   } else if (nal_type == 28U && packet.payload.size() >= 2U) {
     const bool start = (packet.payload[1] & 0x80U) != 0U;
     const bool end = (packet.payload[1] & 0x40U) != 0U;
     if (start) {
+      if (fragmented_) {
+        damaged_ = true;
+      }
       fragment_.clear();
       fragment_.push_back(static_cast<uint8_t>((packet.payload[0] & 0xE0U) | (packet.payload[1] & 0x1FU)));
-      fragment_.insert(fragment_.end(), packet.payload.begin() + 2, packet.payload.end());
-      fragmented_ = true;
+      if (packet.payload.size() - 2U > kMaximumNalBytes - 1U) {
+        damaged_ = true;
+        fragmented_ = false;
+      } else {
+        fragment_.insert(fragment_.end(), packet.payload.begin() + 2, packet.payload.end());
+        fragmented_ = true;
+      }
     } else if (fragmented_) {
-      fragment_.insert(fragment_.end(), packet.payload.begin() + 2, packet.payload.end());
+      const size_t fragment_bytes = packet.payload.size() - 2U;
+      if (fragment_.size() > kMaximumNalBytes - fragment_bytes) {
+        damaged_ = true;
+        fragment_.clear();
+        fragmented_ = false;
+      } else {
+        fragment_.insert(fragment_.end(), packet.payload.begin() + 2, packet.payload.end());
+      }
     } else {
       damaged_ = true;
     }
     if (end && fragmented_) {
-      nals_.push_back(std::move(fragment_));
+      if (nals_.size() >= kMaximumNalsPerAccessUnit ||
+          accumulated_bytes_ > kMaximumAccessUnitBytes - fragment_.size()) {
+        damaged_ = true;
+      } else {
+        accumulated_bytes_ += fragment_.size();
+        nals_.push_back(std::move(fragment_));
+      }
       fragment_.clear();
       fragmented_ = false;
     }
@@ -284,12 +318,24 @@ void SequenceTracker::observe(const uint16_t sequence) noexcept {
   }
   const int16_t distance = static_cast<int16_t>(sequence - expected_);
   if (distance == 0) {
+    // Reuse of a 16-bit sequence after wrap must not inherit a stale missing marker.
+    missing_.reset(sequence);
     expected_ = static_cast<uint16_t>(expected_ + 1U);
   } else if (distance > 0) {
-    stats_.lost += static_cast<uint16_t>(distance);
+    for (uint16_t offset = 0U; offset < static_cast<uint16_t>(distance); ++offset) {
+      const uint16_t missing_sequence = static_cast<uint16_t>(expected_ + offset);
+      missing_.set(missing_sequence);
+      ++stats_.lost;
+    }
     expected_ = static_cast<uint16_t>(sequence + 1U);
   } else {
     ++stats_.reordered;
+    if (missing_.test(sequence)) {
+      missing_.reset(sequence);
+      if (stats_.lost > 0U) {
+        --stats_.lost;
+      }
+    }
   }
 }
 
@@ -303,4 +349,5 @@ uint32_t rtp_timestamp_for_frame(const uint32_t initial_timestamp, const uint64_
   return initial_timestamp + static_cast<uint32_t>(ticks);
 }
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

@@ -1,19 +1,24 @@
 #pragma once
 
-#include "ipmx/phase0/annexb.hpp"
+#include "ipmx/annexb.hpp"
 
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
-namespace phase0 {
+namespace ipmx {
+inline namespace v0 {
 
 inline constexpr uint8_t kH264PayloadType = 96U;
 inline constexpr uint32_t kRtpClockRate = 90'000U;
 inline constexpr uint16_t kCaptureTimeExtensionProfile = 0xBEDEU;
 inline constexpr uint8_t kCaptureTimeExtensionId = 1U;
+inline constexpr std::string_view kCaptureTimeExtensionUri =
+    "urn:ipmx-windows:rtp-hdrext:capture-time-ns";
 
 struct ParsedRtpPacket {
   uint16_t sequence{};
@@ -71,6 +76,7 @@ private:
   uint32_t timestamp_{};
   uint64_t capture_time_ns_{};
   uint16_t last_sequence_{};
+  size_t accumulated_bytes_{};
   std::vector<NalUnit> nals_;
   NalUnit fragment_;
 };
@@ -89,6 +95,7 @@ public:
 private:
   bool initialized_{};
   uint16_t expected_{};
+  std::bitset<65'536U> missing_;
   SequenceStats stats_{};
 };
 
@@ -97,4 +104,5 @@ private:
                                                uint32_t fps_numerator,
                                                uint32_t fps_denominator);
 
-} // namespace phase0
+} // namespace v0
+} // namespace ipmx

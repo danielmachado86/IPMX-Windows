@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace phase0 {
+namespace ipmx::receiver {
 
 using Microsoft::WRL::ComPtr;
 
@@ -56,7 +56,7 @@ D3d11Renderer::D3d11Renderer(const uint32_t width, const uint32_t height)
   window_class.lpfnWndProc = window_proc;
   window_class.hInstance = instance;
   window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-  window_class.lpszClassName = L"IpMxPhase0Receiver";
+  window_class.lpszClassName = L"IPMXWindowsReceiver";
   RegisterClassExW(&window_class);
   RECT rectangle{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
   AdjustWindowRect(&rectangle, WS_OVERLAPPEDWINDOW, FALSE);
@@ -169,7 +169,7 @@ uint64_t D3d11Renderer::present(const DecodedFrame& frame) {
     throw std::invalid_argument("renderer received an invalid NV12 frame");
   }
   state_->context->UpdateSubresource(state_->input_texture.Get(), 0U, nullptr, frame.pixels.data(),
-                                     frame.y_stride, static_cast<UINT>(frame.pixels.size()));
+                                     frame.y_stride, 0U);
   RECT source{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
   state_->video_context->VideoProcessorSetStreamSourceRect(state_->processor.Get(), 0U, TRUE, &source);
   state_->video_context->VideoProcessorSetStreamDestRect(state_->processor.Get(), 0U, TRUE, &source);
@@ -183,4 +183,4 @@ uint64_t D3d11Renderer::present(const DecodedFrame& frame) {
   return steady_now_ns();
 }
 
-} // namespace phase0
+} // namespace ipmx::receiver

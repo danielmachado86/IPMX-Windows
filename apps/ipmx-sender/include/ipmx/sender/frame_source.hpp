@@ -1,11 +1,11 @@
 #pragma once
 
-#include "ipmx/phase0/types.hpp"
+#include "ipmx/types.hpp"
 
 #include <cstdint>
 #include <memory>
 
-namespace phase0 {
+namespace ipmx::sender {
 
 class FrameSource {
 public:
@@ -19,6 +19,7 @@ public:
                                                                    uint32_t height,
                                                                    uint32_t fps_numerator,
                                                                    uint32_t fps_denominator);
-[[nodiscard]] std::unique_ptr<FrameSource> make_primary_monitor_source();
+[[nodiscard]] std::unique_ptr<FrameSource> make_primary_monitor_source(uint32_t fps_numerator,
+                                                                       uint32_t fps_denominator);
 
-} // namespace phase0
+} // namespace ipmx::sender

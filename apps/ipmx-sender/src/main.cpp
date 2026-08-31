@@ -1,7 +1,7 @@
-#include "ipmx/phase0/bgra_to_nv12.hpp"
-#include "ipmx/phase0/rtp.hpp"
-#include "ipmx/phase0/sdp.hpp"
-#include "ipmx/phase0/udp_multicast.hpp"
+#include "ipmx/bgra_to_nv12.hpp"
+#include "ipmx/rtp.hpp"
+#include "ipmx/sdp.hpp"
+#include "ipmx/udp_multicast.hpp"
 #include "ipmx/sender/frame_source.hpp"
 #include "ipmx/sender/x264_encoder.hpp"
 
@@ -41,7 +41,7 @@ struct Options {
   uint32_t bitrate_kbps{4'000U};
   uint32_t duration_seconds{};
   size_t mtu{1200U};
-  std::filesystem::path sdp{"phase0.sdp"};
+  std::filesystem::path sdp{"ipmx.sdp"};
 };
 
 template <typename T>
@@ -95,20 +95,22 @@ int main(const int argc, char** argv) {
     const Options options = parse_options(argc, argv);
     SetConsoleCtrlHandler(stop_handler, TRUE);
 
-    std::unique_ptr<phase0::FrameSource> source = options.source == "screen"
-        ? phase0::make_primary_monitor_source()
-        : phase0::make_test_pattern_source(options.width, options.height,
-                                           options.fps_numerator, options.fps_denominator);
-    const phase0::EncoderSettings encoder_settings{
+    std::unique_ptr<ipmx::sender::FrameSource> source = options.source == "screen"
+        ? ipmx::sender::make_primary_monitor_source(options.fps_numerator,
+                                                    options.fps_denominator)
+        : ipmx::sender::make_test_pattern_source(options.width, options.height,
+                                                 options.fps_numerator,
+                                                 options.fps_denominator);
+    const ipmx::sender::EncoderSettings encoder_settings{
         source->width(), source->height(), options.fps_numerator, options.fps_denominator,
         options.bitrate_kbps};
-    phase0::X264Encoder encoder(encoder_settings);
-    phase0::RtpPacketizer packetizer(options.mtu);
-    phase0::MulticastSender network(options.group, options.port, options.interface_address);
-    phase0::SdpSettings sdp_settings{options.group, options.port, phase0::kH264PayloadType,
-                                     source->width(), source->height(), options.fps_numerator,
-                                     options.fps_denominator, options.bitrate_kbps};
-    phase0::write_phase0_sdp(options.sdp, sdp_settings, encoder.sps(), encoder.pps());
+    ipmx::sender::X264Encoder encoder(encoder_settings);
+    ipmx::RtpPacketizer packetizer(options.mtu);
+    ipmx::MulticastSender network(options.group, options.port, options.interface_address);
+    ipmx::SdpSettings sdp_settings{options.group, options.port, ipmx::kH264PayloadType,
+                                   source->width(), source->height(), options.fps_numerator,
+                                   options.fps_denominator, options.bitrate_kbps};
+    ipmx::write_sdp(options.sdp, sdp_settings, encoder.sps(), encoder.pps());
 
     std::random_device random;
     const uint32_t initial_timestamp = (static_cast<uint32_t>(random()) << 16U) ^ random();
@@ -121,7 +123,8 @@ int main(const int argc, char** argv) {
               << " @ " << options.fps_numerator << " fps -> " << options.group << ':' << options.port
               << " SSRC=" << packetizer.ssrc() << " SDP=" << options.sdp.string() << '\n';
 
-    phase0::BgraFrame bgra;
+    ipmx::BgraFrame bgra;
+    std::optional<ipmx::Nv12Frame> cached_nv12;
     while (running) {
       const auto now = std::chrono::steady_clock::now();
       if (options.duration_seconds != 0U &&
@@ -131,16 +134,21 @@ int main(const int argc, char** argv) {
       if (!source->next(bgra)) {
         continue;
       }
-      auto nv12 = phase0::bgra_to_nv12(bgra);
-      auto access_unit = encoder.encode(nv12, static_cast<int64_t>(frame_index));
+      if (!bgra.repeated) {
+        cached_nv12 = ipmx::bgra_to_nv12(bgra);
+      } else if (!cached_nv12) {
+        continue;
+      }
+      cached_nv12->capture_time_ns = bgra.capture_time_ns;
+      auto access_unit = encoder.encode(*cached_nv12, static_cast<int64_t>(frame_index));
       if (access_unit.nals.empty()) {
         ++frame_index;
         continue;
       }
-      const uint32_t timestamp = phase0::rtp_timestamp_for_frame(
+      const uint32_t timestamp = ipmx::rtp_timestamp_for_frame(
           initial_timestamp, frame_index, options.fps_numerator, options.fps_denominator);
       for (const auto& packet : packetizer.packetize(access_unit.nals, timestamp,
-                                                      nv12.capture_time_ns)) {
+                                                      cached_nv12->capture_time_ns)) {
         network.send(packet);
         ++packet_count;
         byte_count += packet.size();
