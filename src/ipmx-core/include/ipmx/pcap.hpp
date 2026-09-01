@@ -20,6 +20,8 @@ public:
 
   void write(std::span<const uint8_t> udp_payload);
   void write(std::span<const uint8_t> udp_payload, uint64_t unix_time_ns);
+  void write(std::span<const uint8_t> udp_payload, uint64_t unix_time_ns, uint16_t source_port,
+             uint16_t destination_port);
 
 private:
   struct State;
@@ -35,6 +37,8 @@ public:
   AsyncPcapRtpWriter(const AsyncPcapRtpWriter&) = delete;
   AsyncPcapRtpWriter& operator=(const AsyncPcapRtpWriter&) = delete;
   void enqueue(std::vector<uint8_t> udp_payload);
+  void enqueue(std::vector<uint8_t> udp_payload, uint16_t source_port,
+               uint16_t destination_port);
   void close();
 
 private:

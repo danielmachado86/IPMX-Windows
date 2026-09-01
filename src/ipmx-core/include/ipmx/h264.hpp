@@ -76,6 +76,8 @@ struct H264StreamFormat {
                                      uint32_t payload_type) noexcept;
 [[nodiscard]] std::vector<std::string>
 validate_ipmx_sps(const H264SpsInfo& sps, const H264StreamFormat& expected);
+[[nodiscard]] std::vector<std::string>
+validate_ipmx_vbr_sender_sps(const H264SpsInfo& sps, const H264StreamFormat& expected);
 
 } // namespace v0
 } // namespace ipmx

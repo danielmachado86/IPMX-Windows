@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -164,6 +165,12 @@ void test_h264_syntax_and_conformance() {
           "SPS Type II VBR NAL HRD");
   require(ipmx::validate_ipmx_sps(*sps, {1280U, 720U, 60U, 1U}).empty(),
           "SPS IPMX H.264 profile conformance");
+  auto cbr_sps = *sps;
+  cbr_sps.nal_hrd->cbr_flag = true;
+  require(ipmx::validate_ipmx_sps(cbr_sps, {1280U, 720U, 60U, 1U}).empty(),
+          "receiver SPS validation accepts CBR HRD");
+  require(!ipmx::validate_ipmx_vbr_sender_sps(cbr_sps, {1280U, 720U, 60U, 1U}).empty(),
+          "project sender VBR policy rejects CBR HRD");
   require(!ipmx::validate_ipmx_sps(*sps, {1280U, 720U, 30U, 1U}).empty(),
           "SPS rejects mismatched timing");
 
@@ -403,11 +410,71 @@ void test_ipmx_rtcp() {
   report.ts_refclk = "localmac=02-00-00-00-00-01";
   report.cname = "conformance@ipmx-windows";
   report.video = {1280U, 720U, 60U, 1U};
+  report.h264 = ipmx::make_ipmx_h264_media_info({0x67U, 0x64U, 0x00U, 0x20U},
+                                                 {0x68U, 0xAAU});
   const auto compound = ipmx::make_ipmx_rtcp_compound(report);
   const auto inspected = ipmx::inspect_ipmx_rtcp_compound(compound);
   require(inspected.sender_report && inspected.ipmx_info_block &&
-              inspected.compressed_video_info && inspected.sdes_cname,
-          "compound RTCP contains SR, IPMX block 0x0005, and SDES CNAME");
+              inspected.compressed_video_info && inspected.h264_info && inspected.sdes_cname,
+          "compound RTCP contains SR, IPMX blocks 0x0005/0x000A, and SDES CNAME");
+
+  ipmx::IpmxRtcpSenderReport golden;
+  golden.ssrc = 0x11223344U;
+  golden.ptp_seconds = 0x01020304U;
+  golden.ptp_nanoseconds = 0x05060708U;
+  golden.rtp_timestamp = 0x090A0B0CU;
+  golden.packet_count = 0x0D0E0F10U;
+  golden.octet_count = 0x11121314U;
+  golden.block_version = 7U;
+  golden.ts_refclk = "t";
+  golden.media_clock = "m";
+  golden.cname = "c";
+  golden.video = {16U, 8U, 1U, 1U, "YCbCr-4:2:0", "NARROW", "BT709", "SDR", 8U,
+                  128U, 20U, 10U};
+  golden.h264 = ipmx::make_ipmx_h264_media_info({0x67U, 0x64U, 0x00U, 0x20U},
+                                                 {0x68U, 0xAAU});
+  std::vector<uint8_t> expected;
+  const auto append_hex = [&expected](const char* text) {
+    std::istringstream input(text);
+    for (unsigned byte = 0U; input >> std::hex >> byte;)
+      expected.push_back(static_cast<uint8_t>(byte));
+  };
+  append_hex("80 C8 00 3D 11 22 33 44 01 02 03 04 05 06 07 08 09 0A 0B 0C "
+             "0D 0E 0F 10 11 12 13 14 58 31 00 36 07 00 00 00");
+  expected.push_back('t');
+  expected.insert(expected.end(), 63U, 0U);
+  expected.push_back('m');
+  expected.insert(expected.end(), 11U, 0U);
+  append_hex(
+      "00 05 00 16 59 43 62 43 72 2D 34 3A 32 3A 30 00 00 00 00 00 08 00 01 01 "
+      "4E 41 52 52 4F 57 00 00 00 00 00 00 42 54 37 30 39 00 00 00 00 00 00 00 "
+      "00 00 00 00 00 00 00 00 53 44 52 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+      "00 10 00 08 00 00 04 01 00 00 00 00 00 00 00 80 00 14 00 0A 00 0A 00 0A "
+      "00 00 00 43 64 00 20 01 00 00 00 00 00 00 00 00 00 00 00 00 0D 00 00 00 "
+      "5A 32 51 41 49 41 3D 3D 2C 61 4B 6F 3D 00 00 00 81 CA 00 02 11 22 33 44 "
+      "01 01 63 00");
+  const auto actual = ipmx::make_ipmx_rtcp_compound(golden);
+  if (actual != expected) {
+    const size_t common = std::min(actual.size(), expected.size());
+    const auto mismatch = std::mismatch(actual.begin(), actual.begin() + common, expected.begin());
+    const size_t offset = static_cast<size_t>(mismatch.first - actual.begin());
+    throw std::runtime_error("IPMX H.264 RTCP byte mismatch at offset " +
+                             std::to_string(offset) + ", actual size " +
+                             std::to_string(actual.size()) + ", expected size " +
+                             std::to_string(expected.size()));
+  }
+  const auto golden_inspection = ipmx::inspect_ipmx_rtcp_compound(actual);
+  require(golden_inspection.block_version == 7U &&
+              golden_inspection.rtp_timestamp == 0x090A0B0CU &&
+              golden_inspection.packet_count == 0x0D0E0F10U &&
+              golden_inspection.octet_count == 0x11121314U,
+          "RTCP inspection recovers version, timestamp, and sender counters");
+
+  auto malformed = actual;
+  malformed[30U] = 0U;
+  malformed[31U] = 43U;
+  require(!ipmx::inspect_ipmx_rtcp_compound(malformed).h264_info,
+          "reject mismatched IPMX Info Block length");
 }
 
 } // namespace

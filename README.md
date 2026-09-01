@@ -147,16 +147,22 @@ ante pérdida/reordenamiento, falta de cuadros o latencia, o crecimiento medio s
 ./scripts/run-stability.ps1 -DurationSeconds 90 -Source test
 ```
 
+Los retardos de planificación se pueden cambiar sin recompilar mediante
+`--encoder-delay-us`, `--sender-reports-delay-us` y `--access-unit-offset-us` en el emisor, o
+mediante `-EncoderDelayUs`, `-SenderReportsDelayUs` y `-AccessUnitOffsetUs` en este runner. Los
+tres aceptan cero. Si no se especifican, `encoder_delay` es un período de cuadro,
+`sender_reports_delay` coincide con éste y el AU offset es 1 ms.
+
 Debe repetirse con `-Source screen`. La existencia del código y del runner no demuestra por sí sola
 el criterio: hace falta conservar una ejecución real de 30 minutos con pérdida y reordenamiento en
 cero, memoria estable y latencia de captura a presentación reportada.
 
 ## Alcance actual
 
-La Fase 1 incluye BGRA a NV12; x264 Main/High 4:2:0/8-bit sin B-frames; VBR limitado con VBV y Type
+Las Fases 1 y 2 incluyen BGRA a NV12; x264 Main/High 4:2:0/8-bit sin B-frames; VBR limitado con VBV y Type
 II NAL HRD; VUI BT.709 de rango estrecho; Buffering Period y Picture Timing SEI; parsing
 independiente de SPS/PPS/SEI; Single NAL/FU-A; RTP de 90 kHz con shaping TR-10-7; RTCP Sender
-Reports IPMX; `MAXUDP` configurable sin fragmentación IPv4; SDP IPMX; y golden H.264/PCAP
+Reports IPMX con bloques `0x0005` y H.264 `0x000A`; `MAXUDP` configurable sin fragmentación IPv4; SDP IPMX; y golden H.264/PCAP
 comprobados en CTest.
 
 No se incluyen un grandmaster PTP externo, NMOS, redundancia ni FEC; por ello la conformidad
@@ -196,7 +202,11 @@ cola acotada emite ráfagas de hasta `CMAX`, aplica un límite de deriva y manti
 de cada cuadro sobre el periodo nominal. La escritura PCAP ocurre en otro hilo.
 
 Antes del primer RTP de cada cuadro se envía a `media+1` un compound RTCP con Sender Report, IPMX
-Info Block, Media Info Block de vídeo comprimido `0x0005` y SDES CNAME. Sin una referencia PTP
+Info Block, Media Info Block de vídeo comprimido `0x0005`, Media Info Block H.264 `0x000A` y SDES
+CNAME. El `0x000A` replica `profile-level-id`, `packetization-mode` y `sprop-parameter-sets` del SDP.
+Los tiempos nominales `encoder_delay` y `sender_reports_delay` se fijan al iniciar la sesión, se
+programan respecto al tiempo de captura y se conserva el SR incluso si el encoder omite el access
+unit. El emisor muestra los tres retardos efectivos al arrancar. Sin una referencia PTP
 común, el SDP y el Info Block identifican el reloj interno con `ts-refclk:localmac`; las fuentes
 síncronas declaran `mediaclk:direct=0`.
 
@@ -232,7 +242,7 @@ ipmx-sender --profile high --bitrate-kbps 4000 --max-ip-bitrate-kbps 4400 `
 ```
 
 `--dump-h264` y `--dump-pcap` permiten conservar artefactos de regresión. El PCAP usa LINKTYPE_RAW,
-incluye IPv4 con DF y conserva exactamente los datagramas RTP enviados.
+incluye IPv4 con DF y conserva en orden los datagramas RTP y RTCP enviados.
 
 ### Contadores y aceptación
 

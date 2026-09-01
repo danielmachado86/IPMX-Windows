@@ -116,9 +116,9 @@ X264Encoder::X264Encoder(const EncoderSettings& settings) : state_(std::make_uni
   if (!parsed_sps || !parsed_pps) {
     throw std::runtime_error("x264 produced invalid SPS/PPS headers");
   }
-  const auto errors =
-      validate_ipmx_sps(*parsed_sps, {settings.width, settings.height, settings.fps_numerator,
-                                      settings.fps_denominator});
+  const auto errors = validate_ipmx_vbr_sender_sps(
+      *parsed_sps,
+      {settings.width, settings.height, settings.fps_numerator, settings.fps_denominator});
   if (!errors.empty()) {
     std::ostringstream message;
     message << "x264 SPS does not conform to the IPMX H.264 profile";

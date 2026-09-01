@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -98,9 +99,42 @@ private:
 
 } // namespace
 
+IpmxFrameSchedule make_ipmx_frame_schedule(const uint64_t capture_time_ns,
+                                            const uint64_t encoder_delay_ns,
+                                            const uint64_t sender_reports_delay_ns,
+                                            const uint64_t access_unit_offset_ns) {
+  if (capture_time_ns == 0U || sender_reports_delay_ns > encoder_delay_ns ||
+      capture_time_ns > std::numeric_limits<uint64_t>::max() - encoder_delay_ns ||
+      capture_time_ns + encoder_delay_ns >
+          std::numeric_limits<uint64_t>::max() - access_unit_offset_ns) {
+    throw std::invalid_argument("invalid IPMX H.264 frame timing");
+  }
+  return {capture_time_ns + sender_reports_delay_ns, capture_time_ns + encoder_delay_ns,
+          capture_time_ns + encoder_delay_ns + access_unit_offset_ns};
+}
+
+IpmxSessionTiming resolve_ipmx_session_timing(
+    const uint32_t fps_numerator, const uint32_t fps_denominator,
+    const std::optional<uint64_t> encoder_delay_ns,
+    const std::optional<uint64_t> sender_reports_delay_ns,
+    const uint64_t access_unit_offset_ns) {
+  if (fps_numerator == 0U || fps_denominator == 0U)
+    throw std::invalid_argument("frame rate must be non-zero");
+  const uint64_t frame_period_ns =
+      (1'000'000'000ULL * fps_denominator + fps_numerator - 1U) / fps_numerator;
+  const uint64_t resolved_encoder_delay = encoder_delay_ns.value_or(frame_period_ns);
+  const uint64_t resolved_sender_reports_delay =
+      sender_reports_delay_ns.value_or(resolved_encoder_delay);
+  static_cast<void>(make_ipmx_frame_schedule(1U, resolved_encoder_delay,
+                                             resolved_sender_reports_delay,
+                                             access_unit_offset_ns));
+  return {resolved_encoder_delay, resolved_sender_reports_delay, access_unit_offset_ns};
+}
+
 struct FrameTransmitter::State {
   explicit State(FrameTransmitterSettings value) : settings(std::move(value)) {}
   FrameTransmitterSettings settings;
+  IpmxSessionTiming timing;
   mutable std::mutex mutex;
   std::condition_variable ready;
   std::condition_variable space;
@@ -117,6 +151,14 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
   if (state_->settings.maximum_queued_frames == 0U)
     throw std::invalid_argument("transmit queue must contain at least one frame");
   validate_ipmx_media_port(state_->settings.media_port);
+  if (state_->settings.video.fps_numerator == 0U ||
+      state_->settings.video.fps_denominator == 0U) {
+    throw std::invalid_argument("transmitter needs a valid frame rate");
+  }
+  state_->timing = resolve_ipmx_session_timing(
+      state_->settings.video.fps_numerator, state_->settings.video.fps_denominator,
+      state_->settings.encoder_delay_ns, state_->settings.sender_reports_delay_ns,
+      state_->settings.access_unit_offset_ns);
   State* state = state_.get();
   state_->worker = std::thread([state] {
     try {
@@ -145,7 +187,8 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
       uint64_t payload_octets = 0U;
       uint64_t frame_count = 0U;
       uint64_t rtcp_count = 0U;
-      uint64_t schedule_origin_ns = 0U;
+      uint64_t maximum_sender_report_lateness_ns = 0U;
+      uint64_t maximum_encoder_cpb_lateness_ns = 0U;
       for (;;) {
         TransmitFrame frame;
         {
@@ -160,28 +203,19 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
           state->queue.pop_front();
           state->space.notify_one();
         }
-        if (frame.rtp_packets.empty())
-          continue;
-
-        const uint64_t frame_period_numerator =
-            1'000'000'000ULL * state->settings.video.fps_denominator;
-        if (schedule_origin_ns == 0U) {
-          const uint64_t prebuffer_ns =
-              (2U * frame_period_numerator + state->settings.video.fps_numerator - 1U) /
-              state->settings.video.fps_numerator;
-          schedule_origin_ns = steady_now_ns() + prebuffer_ns;
-        }
-        const uint64_t frame_deadline_ns =
-            schedule_origin_ns +
-            (frame_count * frame_period_numerator) / state->settings.video.fps_numerator;
+        const uint64_t capture_time_ns =
+            frame.capture_time_ns != 0U ? frame.capture_time_ns : steady_now_ns();
+        const auto schedule = make_ipmx_frame_schedule(
+            capture_time_ns, state->timing.encoder_delay_ns,
+            state->timing.sender_reports_delay_ns, state->timing.access_unit_offset_ns);
 
         const auto wall = std::chrono::system_clock::now().time_since_epoch();
         const uint64_t wall_now_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(wall).count());
         const uint64_t steady_reference_ns = steady_now_ns();
         const uint64_t wall_ns =
-            frame.capture_time_ns != 0U && wall_now_ns >= steady_reference_ns
-                ? wall_now_ns - steady_reference_ns + frame.capture_time_ns
+            wall_now_ns >= steady_reference_ns
+                ? wall_now_ns - steady_reference_ns + capture_time_ns
                 : wall_now_ns;
         IpmxRtcpSenderReport report;
         report.ssrc = state->settings.ssrc;
@@ -190,11 +224,49 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
         report.rtp_timestamp = frame.rtp_timestamp;
         report.packet_count = static_cast<uint32_t>(packet_count);
         report.octet_count = static_cast<uint32_t>(payload_octets);
+        report.block_version = state->settings.block_version;
         report.ts_refclk = state->settings.ts_refclk;
         report.media_clock = state->settings.media_clock;
         report.cname = state->settings.cname;
         report.video = state->settings.video;
+        report.h264 = state->settings.h264;
         const auto compound = make_ipmx_rtcp_compound(report);
+
+        waiter.wait_until(schedule.sender_report_time_ns);
+        const uint64_t sender_report_actual_ns = steady_now_ns();
+        maximum_sender_report_lateness_ns =
+            std::max(maximum_sender_report_lateness_ns,
+                     sender_report_actual_ns > schedule.sender_report_time_ns
+                         ? sender_report_actual_ns - schedule.sender_report_time_ns
+                         : 0U);
+        rtcp_network.send(compound);
+        if (pcap) {
+          const uint16_t rtcp_port = reserved_rtcp_port(state->settings.media_port);
+          pcap->enqueue(compound, rtcp_port, rtcp_port);
+        }
+        ++rtcp_count;
+
+        if (frame.rtp_packets.empty()) {
+          ++frame_count;
+          std::lock_guard lock(state->mutex);
+          state->stats = {frame_count,
+                          packet_count,
+                          payload_octets,
+                          rtcp_count,
+                          maximum_sender_report_lateness_ns,
+                          maximum_encoder_cpb_lateness_ns,
+                          intervals.maximum_interval_spread_ns(),
+                          intervals.window_observed()};
+          continue;
+        }
+
+        waiter.wait_until(schedule.encoder_cpb_insertion_time_ns);
+        const uint64_t encoder_cpb_actual_ns = steady_now_ns();
+        maximum_encoder_cpb_lateness_ns =
+            std::max(maximum_encoder_cpb_lateness_ns,
+                     encoder_cpb_actual_ns > schedule.encoder_cpb_insertion_time_ns
+                         ? encoder_cpb_actual_ns - schedule.encoder_cpb_insertion_time_ns
+                         : 0U);
 
         size_t offset = 0U;
         bool first_burst = true;
@@ -204,13 +276,7 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
           for (size_t index = 0U; index < count; ++index)
             ip_bytes += frame.rtp_packets[offset + index].size() + 28U;
           const uint64_t scheduled = shaper.schedule_burst_ns(
-              first_burst ? frame_deadline_ns : steady_now_ns(), ip_bytes);
-          if (first_burst) {
-            constexpr uint64_t rtcp_lead_ns = 1'000'000U;
-            waiter.wait_until(scheduled > rtcp_lead_ns ? scheduled - rtcp_lead_ns : scheduled);
-            rtcp_network.send(compound);
-            ++rtcp_count;
-          }
+              first_burst ? schedule.first_rtp_time_ns : steady_now_ns(), ip_bytes);
           waiter.wait_until(scheduled);
           for (size_t index = 0U; index < count; ++index) {
             auto& packet = frame.rtp_packets[offset + index];
@@ -230,6 +296,7 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
         {
           std::lock_guard lock(state->mutex);
           state->stats = {frame_count, packet_count, payload_octets, rtcp_count,
+                          maximum_sender_report_lateness_ns, maximum_encoder_cpb_lateness_ns,
                           intervals.maximum_interval_spread_ns(), intervals.window_observed()};
         }
       }
@@ -291,5 +358,7 @@ FrameTransmitterStats FrameTransmitter::stats() const {
     std::rethrow_exception(state_->error);
   return state_->stats;
 }
+
+IpmxSessionTiming FrameTransmitter::timing() const { return state_->timing; }
 
 } // namespace ipmx::sender

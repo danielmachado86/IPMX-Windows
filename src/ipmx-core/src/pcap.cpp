@@ -109,8 +109,13 @@ void PcapRtpWriter::write(const std::span<const uint8_t> udp_payload) {
 }
 
 void PcapRtpWriter::write(const std::span<const uint8_t> udp_payload, const uint64_t unix_time_ns) {
+  write(udp_payload, unix_time_ns, state_->source_port, state_->destination_port);
+}
+
+void PcapRtpWriter::write(const std::span<const uint8_t> udp_payload, const uint64_t unix_time_ns,
+                          const uint16_t source_port, const uint16_t destination_port) {
   if (udp_payload.size() > std::numeric_limits<uint16_t>::max() - 28U) {
-    throw std::length_error("RTP packet is too large for IPv4 PCAP");
+    throw std::length_error("UDP packet is too large for IPv4 PCAP");
   }
   std::vector<uint8_t> packet(28U + udp_payload.size(), 0U);
   packet[0] = 0x45U;
@@ -122,8 +127,8 @@ void PcapRtpWriter::write(const std::span<const uint8_t> udp_payload, const uint
   std::copy(state_->source.begin(), state_->source.end(), packet.begin() + 12);
   std::copy(state_->destination.begin(), state_->destination.end(), packet.begin() + 16);
   write_u16_be(packet, 10U, ipv4_checksum(std::span<const uint8_t>(packet.data(), 20U)));
-  write_u16_be(packet, 20U, state_->source_port);
-  write_u16_be(packet, 22U, state_->destination_port);
+  write_u16_be(packet, 20U, source_port);
+  write_u16_be(packet, 22U, destination_port);
   write_u16_be(packet, 24U, static_cast<uint16_t>(udp_payload.size() + 8U));
   std::copy(udp_payload.begin(), udp_payload.end(), packet.begin() + 28);
 
@@ -141,8 +146,12 @@ struct AsyncPcapRtpWriter::State {
   struct Entry {
     std::vector<uint8_t> payload;
     uint64_t unix_time_ns{};
+    uint16_t source_port{};
+    uint16_t destination_port{};
   };
   PcapRtpWriter writer;
+  uint16_t source_port{};
+  uint16_t destination_port{};
   std::mutex mutex;
   std::condition_variable ready;
   std::deque<Entry> entries;
@@ -155,7 +164,8 @@ struct AsyncPcapRtpWriter::State {
         std::string destination_address, const uint16_t source_port,
         const uint16_t destination_port)
       : writer(path, std::move(source_address), std::move(destination_address), source_port,
-               destination_port) {}
+               destination_port),
+        source_port(source_port), destination_port(destination_port) {}
 };
 
 AsyncPcapRtpWriter::AsyncPcapRtpWriter(const std::filesystem::path& path,
@@ -182,7 +192,8 @@ AsyncPcapRtpWriter::AsyncPcapRtpWriter(const std::filesystem::path& path,
           entry = std::move(state->entries.front());
           state->entries.pop_front();
         }
-        state->writer.write(entry.payload, entry.unix_time_ns);
+        state->writer.write(entry.payload, entry.unix_time_ns, entry.source_port,
+                            entry.destination_port);
       }
     } catch (...) {
       std::lock_guard lock(state->mutex);
@@ -201,6 +212,11 @@ AsyncPcapRtpWriter::~AsyncPcapRtpWriter() {
 }
 
 void AsyncPcapRtpWriter::enqueue(std::vector<uint8_t> udp_payload) {
+  enqueue(std::move(udp_payload), state_->source_port, state_->destination_port);
+}
+
+void AsyncPcapRtpWriter::enqueue(std::vector<uint8_t> udp_payload, const uint16_t source_port,
+                                 const uint16_t destination_port) {
   const auto now = std::chrono::system_clock::now().time_since_epoch();
   const uint64_t unix_time_ns =
       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
@@ -214,7 +230,8 @@ void AsyncPcapRtpWriter::enqueue(std::vector<uint8_t> udp_payload) {
     ++state_->dropped;
     return;
   }
-  state_->entries.push_back({std::move(udp_payload), unix_time_ns});
+  state_->entries.push_back(
+      {std::move(udp_payload), unix_time_ns, source_port, destination_port});
   state_->ready.notify_one();
 }
 

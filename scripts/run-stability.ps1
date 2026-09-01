@@ -21,7 +21,19 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 10000)]
-    [int]$MaximumLatencyMs = 250
+    [int]$MaximumLatencyMs = 250,
+
+    [Parameter()]
+    [ValidateRange(0, 86400000000)]
+    [Nullable[long]]$EncoderDelayUs = $null,
+
+    [Parameter()]
+    [ValidateRange(0, 86400000000)]
+    [Nullable[long]]$SenderReportsDelayUs = $null,
+
+    [Parameter()]
+    [ValidateRange(0, 86400000000)]
+    [Nullable[long]]$AccessUnitOffsetUs = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,12 +58,23 @@ $sdpPath = Join-Path $outputDirectory ("ipmx-" + [guid]::NewGuid().ToString("N")
 $receiver = $null
 $sender = $null
 try {
-    $sender = Start-Process -FilePath $senderPath -ArgumentList @(
+    $senderArguments = @(
         "--source", $Source,
         "--duration-seconds", $DurationSeconds,
         "--sdp", $sdpPath,
         "--require-timing-compliance"
-    ) -RedirectStandardOutput $senderLog -RedirectStandardError $senderError `
+    )
+    if ($null -ne $EncoderDelayUs) {
+        $senderArguments += @("--encoder-delay-us", $EncoderDelayUs)
+    }
+    if ($null -ne $SenderReportsDelayUs) {
+        $senderArguments += @("--sender-reports-delay-us", $SenderReportsDelayUs)
+    }
+    if ($null -ne $AccessUnitOffsetUs) {
+        $senderArguments += @("--access-unit-offset-us", $AccessUnitOffsetUs)
+    }
+    $sender = Start-Process -FilePath $senderPath -ArgumentList $senderArguments `
+        -RedirectStandardOutput $senderLog -RedirectStandardError $senderError `
         -WindowStyle Hidden -PassThru
     $sdpDeadline = [datetime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $sdpPath) -and [datetime]::UtcNow -lt $sdpDeadline) {
@@ -112,6 +135,9 @@ try {
     [pscustomobject]@{
         DurationSeconds   = $DurationSeconds
         WarmupSeconds     = $effectiveWarmup
+        EncoderDelayUs    = $EncoderDelayUs
+        SenderReportsDelayUs = $SenderReportsDelayUs
+        AccessUnitOffsetUs = $AccessUnitOffsetUs
         Samples           = $samples.Count
         SenderExitCode    = $sender.ExitCode
         ReceiverExitCode  = $receiver.ExitCode

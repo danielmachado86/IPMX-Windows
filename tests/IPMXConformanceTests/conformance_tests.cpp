@@ -1,7 +1,9 @@
 #include "ipmx/annexb.hpp"
 #include "ipmx/h264.hpp"
 #include "ipmx/receiver/mf_h264_decoder.hpp"
+#include "ipmx/rtcp.hpp"
 #include "ipmx/rtp.hpp"
+#include "ipmx/sender/frame_transmitter.hpp"
 #include "ipmx/sender/x264_encoder.hpp"
 #include "ipmx/types.hpp"
 
@@ -11,8 +13,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -98,7 +102,11 @@ void test_golden_pcap() {
           "golden PCAP header");
   size_t offset = 24U;
   size_t packets = 0U;
+  size_t reports = 0U;
+  uint64_t payload_octets = 0U;
   bool saw_vcl = false;
+  std::unordered_set<uint32_t> reported_timestamps;
+  std::unordered_set<uint32_t> media_timestamps;
   while (offset < bytes.size()) {
     require(offset + 16U <= bytes.size(), "complete PCAP record header");
     const uint32_t captured = read_u32_le(bytes, offset + 8U);
@@ -110,18 +118,73 @@ void test_golden_pcap() {
     require(read_u16_be(ip_packet, 2U) == captured && captured <= 1488U,
             "golden packet avoids IPv4 fragmentation");
     require((read_u16_be(ip_packet, 6U) & 0x4000U) != 0U, "golden packet has DF set");
-    require(ip_packet[9] == 17U && read_u16_be(ip_packet, 22U) == 5004U, "golden UDP destination");
+    require(ip_packet[9] == 17U, "golden transport is UDP");
+    const uint16_t destination_port = read_u16_be(ip_packet, 22U);
+    if (destination_port == 5005U) {
+      const std::vector<uint8_t> rtcp(ip_packet.begin() + 28, ip_packet.end());
+      const auto inspection = ipmx::inspect_ipmx_rtcp_compound(rtcp);
+      require(inspection.sender_report && inspection.ipmx_info_block &&
+                  inspection.compressed_video_info && inspection.h264_info &&
+                  inspection.sdes_cname,
+              "golden RTCP has complete IPMX H.264 info");
+      require(inspection.packet_count == packets && inspection.octet_count == payload_octets,
+              "golden sender counters cover all preceding RTP packets");
+      require(reported_timestamps.insert(inspection.rtp_timestamp).second,
+              "golden has one RTCP sender report per frame timestamp");
+      ++reports;
+      offset += captured;
+      continue;
+    }
+    require(destination_port == 5004U, "golden UDP destination is RTP or reserved RTCP");
     const auto rtp = ipmx::parse_rtp_packet(ip_packet.subspan(28U));
     require(rtp.has_value(), "golden RTP packet parses");
+    require(reported_timestamps.contains(rtp->timestamp),
+            "sender report precedes the first RTP packet of its access unit");
+    media_timestamps.insert(rtp->timestamp);
     const uint8_t packetization_type = static_cast<uint8_t>(rtp->payload.front() & 0x1FU);
     require((packetization_type >= 1U && packetization_type <= 23U) || packetization_type == 28U,
             "golden RTP uses only Single NAL or FU-A");
     saw_vcl = saw_vcl || packetization_type == 1U || packetization_type == 5U ||
               (packetization_type == 28U && (rtp->payload[1] & 0x1FU) <= 5U);
+    payload_octets += rtp->payload.size();
     ++packets;
     offset += captured;
   }
   require(packets > 0U && saw_vcl, "golden PCAP contains H.264 video RTP");
+  require(reports == reported_timestamps.size() && reports >= media_timestamps.size(),
+          "golden PCAP has a sender report for every progressive frame");
+}
+
+void test_h264_sender_report_schedule() {
+  const auto defaults =
+      ipmx::sender::resolve_ipmx_session_timing(60U, 1U, std::nullopt, std::nullopt, 1'000'000U);
+  require(defaults.encoder_delay_ns == 16'666'667U &&
+              defaults.sender_reports_delay_ns == defaults.encoder_delay_ns &&
+              defaults.access_unit_offset_ns == 1'000'000U,
+          "default encoder delay is one frame period and remains constant for sender reports");
+  const auto first = ipmx::sender::make_ipmx_frame_schedule(1'000U, 300U, 200U, 50U);
+  const auto second = ipmx::sender::make_ipmx_frame_schedule(2'000U, 300U, 200U, 50U);
+  require(first.sender_report_time_ns == 1'200U &&
+              first.encoder_cpb_insertion_time_ns == 1'300U && first.first_rtp_time_ns == 1'350U,
+          "H.264 frame schedule uses the configured session delays");
+  require(second.sender_report_time_ns - first.sender_report_time_ns == 1'000U &&
+              second.encoder_cpb_insertion_time_ns - first.encoder_cpb_insertion_time_ns == 1'000U,
+          "encoder_delay and sender_reports_delay remain constant across frames");
+  const auto zero_delay = ipmx::sender::resolve_ipmx_session_timing(60U, 1U, 0U, 0U, 0U);
+  const auto immediate = ipmx::sender::make_ipmx_frame_schedule(
+      1'000U, zero_delay.encoder_delay_ns, zero_delay.sender_reports_delay_ns,
+      zero_delay.access_unit_offset_ns);
+  require(immediate.sender_report_time_ns == 1'000U &&
+              immediate.encoder_cpb_insertion_time_ns == 1'000U &&
+              immediate.first_rtp_time_ns == 1'000U,
+          "explicit zero delays are preserved");
+  bool rejected = false;
+  try {
+    static_cast<void>(ipmx::sender::make_ipmx_frame_schedule(1U, 100U, 101U, 1U));
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "sender_reports_delay cannot exceed encoder_delay");
 }
 
 void test_live_x264_contract() {
@@ -130,7 +193,8 @@ void test_live_x264_contract() {
   constexpr uint32_t fps = 30U;
   ipmx::sender::X264Encoder encoder({width, height, fps, 1U, 1'000U});
   const auto sps = ipmx::parse_h264_sps(encoder.sps());
-  require(sps.has_value() && ipmx::validate_ipmx_sps(*sps, {width, height, fps, 1U}).empty(),
+  require(sps.has_value() &&
+              ipmx::validate_ipmx_vbr_sender_sps(*sps, {width, height, fps, 1U}).empty(),
           "live x264 SPS conforms");
 
   ipmx::Nv12Frame frame;
@@ -195,6 +259,7 @@ int main() {
   try {
     test_golden_bitstream();
     test_golden_pcap();
+    test_h264_sender_report_schedule();
     test_live_x264_contract();
     test_receiver_main_and_high_profiles();
     std::cout << "ipmx_conformance_tests: PASS\n";

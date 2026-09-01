@@ -9,7 +9,11 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $build = (Resolve-Path -LiteralPath (Join-Path $root $BuildDirectory)).Path
 $sender = (Resolve-Path -LiteralPath (Join-Path $build "bin\ipmx-sender.exe")).Path
 $data = Join-Path $root "tests\IPMXConformanceTests\data"
-$sdp = Join-Path $data "ipmx_golden.sdp.tmp"
+$staging = Join-Path $root "out\golden-staging"
+$sdp = Join-Path $staging "ipmx_golden.sdp.tmp"
+$h264 = Join-Path $staging "ipmx_golden.h264"
+$pcap = Join-Path $staging "ipmx_golden.pcap"
+New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
 try {
     & $sender `
@@ -23,11 +27,13 @@ try {
         --maxudp 1200 `
         --duration-seconds 1 `
         --sdp $sdp `
-        --dump-h264 (Join-Path $data "ipmx_golden.h264") `
-        --dump-pcap (Join-Path $data "ipmx_golden.pcap")
+        --dump-h264 $h264 `
+        --dump-pcap $pcap
     if ($LASTEXITCODE -ne 0) {
         throw "Golden generation failed with exit code $LASTEXITCODE."
     }
+    Copy-Item -LiteralPath $h264 -Destination (Join-Path $data "ipmx_golden.h264") -Force
+    Copy-Item -LiteralPath $pcap -Destination (Join-Path $data "ipmx_golden.pcap") -Force
 }
 finally {
     Remove-Item -LiteralPath $sdp -ErrorAction SilentlyContinue

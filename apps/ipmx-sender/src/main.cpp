@@ -50,6 +50,9 @@ struct Options {
   std::filesystem::path dump_h264;
   std::filesystem::path dump_pcap;
   std::string ts_refclk;
+  std::optional<uint64_t> encoder_delay_ns;
+  std::optional<uint64_t> sender_reports_delay_ns;
+  std::optional<uint64_t> access_unit_offset_ns;
   bool require_timing_compliance{};
 };
 
@@ -64,6 +67,13 @@ template <typename T>
   return static_cast<T>(value);
 }
 
+[[nodiscard]] uint64_t parse_delay_us(const std::string_view text, const char* option) {
+  const uint64_t microseconds = parse_number<uint64_t>(text, option);
+  if (microseconds > std::numeric_limits<uint64_t>::max() / 1'000U)
+    throw std::invalid_argument(std::string("invalid value for ") + option);
+  return microseconds * 1'000U;
+}
+
 [[nodiscard]] Options parse_options(const int argc, char** argv) {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -72,7 +82,8 @@ template <typename T>
       std::cout << "ipmx-sender [--source test|screen] [--width N] [--height N] "
                    "[--fps N] [--bitrate-kbps N] [--profile main|high] [--max-ip-bitrate-kbps N] "
                    "[--group A.B.C.D] [--port N] [--interface A.B.C.D] [--maxudp N] "
-                   "[--ts-refclk VALUE] [--duration-seconds N] [--sdp PATH] "
+                   "[--ts-refclk VALUE] [--encoder-delay-us N] [--sender-reports-delay-us N] "
+                   "[--access-unit-offset-us N] [--duration-seconds N] [--sdp PATH] "
                    "[--dump-h264 PATH] [--dump-pcap PATH] [--require-timing-compliance]\n";
       std::exit(0);
     }
@@ -121,6 +132,12 @@ template <typename T>
       options.dump_pcap = value;
     else if (key == "--ts-refclk")
       options.ts_refclk = value;
+    else if (key == "--encoder-delay-us")
+      options.encoder_delay_ns = parse_delay_us(value, "--encoder-delay-us");
+    else if (key == "--sender-reports-delay-us")
+      options.sender_reports_delay_ns = parse_delay_us(value, "--sender-reports-delay-us");
+    else if (key == "--access-unit-offset-us")
+      options.access_unit_offset_ns = parse_delay_us(value, "--access-unit-offset-us");
     else
       throw std::invalid_argument("unknown option: " + std::string(key));
   }
@@ -203,15 +220,25 @@ int main(const int argc, char** argv) {
     transmitter_settings.ts_refclk = ts_refclk;
     transmitter_settings.cname = ts_refclk + "@ipmx-windows";
     transmitter_settings.video = {source->width(), source->height(), options.fps_numerator,
-                                  options.fps_denominator};
+                                   options.fps_denominator};
+    transmitter_settings.h264 = ipmx::make_ipmx_h264_media_info(encoder.sps(), encoder.pps());
+    transmitter_settings.encoder_delay_ns = options.encoder_delay_ns;
+    transmitter_settings.sender_reports_delay_ns = options.sender_reports_delay_ns;
+    if (options.access_unit_offset_ns)
+      transmitter_settings.access_unit_offset_ns = *options.access_unit_offset_ns;
     transmitter_settings.pcap_path = options.dump_pcap;
     ipmx::sender::FrameTransmitter transmitter(std::move(transmitter_settings));
+    const auto session_timing = transmitter.timing();
     uint64_t frame_index = 0U;
     const auto started = std::chrono::steady_clock::now();
     auto last_report = started;
     std::cout << "Sender: " << options.source << ' ' << source->width() << 'x' << source->height()
               << " @ " << options.fps_numerator << " fps -> " << options.group << ':'
               << options.port << " SSRC=" << packetizer.ssrc() << " SDP=" << options.sdp.string()
+              << " encoder_delay_ms=" << session_timing.encoder_delay_ns / 1'000'000.0
+              << " sender_reports_delay_ms="
+              << session_timing.sender_reports_delay_ns / 1'000'000.0
+              << " access_unit_offset_ms=" << session_timing.access_unit_offset_ns / 1'000'000.0
               << '\n';
 
     ipmx::BgraFrame bgra;
@@ -232,11 +259,7 @@ int main(const int argc, char** argv) {
       }
       cached_nv12->capture_time_ns = bgra.capture_time_ns;
       auto access_unit = encoder.encode(*cached_nv12, static_cast<int64_t>(frame_index));
-      if (access_unit.nals.empty()) {
-        ++frame_index;
-        continue;
-      }
-      if (bitstream.is_open()) {
+      if (bitstream.is_open() && !access_unit.nals.empty()) {
         const auto annex_b = ipmx::build_annex_b(access_unit.nals);
         bitstream.write(reinterpret_cast<const char*>(annex_b.data()),
                         static_cast<std::streamsize>(annex_b.size()));
@@ -263,11 +286,17 @@ int main(const int argc, char** argv) {
     transmitter.close();
     const auto stats = transmitter.stats();
     const double jitter_ms = static_cast<double>(stats.maximum_interval_spread_ns) / 1'000'000.0;
+    const double sender_report_lateness_ms =
+        static_cast<double>(stats.maximum_sender_report_lateness_ns) / 1'000'000.0;
+    const double encoder_cpb_lateness_ms =
+        static_cast<double>(stats.maximum_encoder_cpb_lateness_ns) / 1'000'000.0;
     const bool timing_compliant = stats.timing_window_observed && jitter_ms <= 2.0;
     std::cout << "Sender stopped: frames=" << frame_index << " sent=" << stats.frames
               << " packets=" << stats.packets << " rtcp=" << stats.rtcp_reports
-              << " frame_interval_spread_ms=" << jitter_ms
-              << " timing=" << (timing_compliant ? "PASS" : "FAIL")
+               << " frame_interval_spread_ms=" << jitter_ms
+               << " sender_report_lateness_ms=" << sender_report_lateness_ms
+               << " encoder_cpb_lateness_ms=" << encoder_cpb_lateness_ms
+               << " timing=" << (timing_compliant ? "PASS" : "FAIL")
               << " missing_picture_timing=" << encoder.missing_picture_timing_count()
               << " incomplete_recovery=" << encoder.incomplete_recovery_point_count() << '\n';
     return options.require_timing_compliance &&

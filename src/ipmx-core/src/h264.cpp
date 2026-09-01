@@ -396,12 +396,18 @@ std::vector<std::string> validate_ipmx_sps(const H264SpsInfo& sps,
   } else {
     if (sps.nal_hrd->cpb_cnt_minus1 != 0U)
       errors.emplace_back("HRD has more than one CPB");
-    if (sps.nal_hrd->cbr_flag)
-      errors.emplace_back("HRD signals CBR instead of VBR");
   }
   if (sps.max_num_reorder_frames && *sps.max_num_reorder_frames != 0U) {
     errors.emplace_back("pictures may be reordered");
   }
+  return errors;
+}
+
+std::vector<std::string> validate_ipmx_vbr_sender_sps(const H264SpsInfo& sps,
+                                                      const H264StreamFormat& expected) {
+  auto errors = validate_ipmx_sps(sps, expected);
+  if (sps.nal_hrd && sps.nal_hrd->cbr_flag)
+    errors.emplace_back("HRD signals CBR instead of VBR");
   return errors;
 }
 
