@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ipmx/annexb.hpp"
+#include "ipmx/network_limits.hpp"
 
 #include <bitset>
 #include <cstddef>
@@ -36,16 +37,15 @@ public:
                          uint8_t payload_type = kH264PayloadType,
                          std::optional<uint32_t> deterministic_seed = std::nullopt);
 
-  [[nodiscard]] std::vector<std::vector<uint8_t>> packetize(const std::vector<NalUnit>& nals,
-                                                             uint32_t timestamp,
-                                                             uint64_t capture_time_ns);
+  [[nodiscard]] std::vector<std::vector<uint8_t>>
+  packetize(const std::vector<NalUnit>& nals, uint32_t timestamp, uint64_t capture_time_ns);
   [[nodiscard]] uint32_t ssrc() const noexcept { return ssrc_; }
   [[nodiscard]] uint16_t next_sequence() const noexcept { return sequence_; }
+  [[nodiscard]] size_t maximum_datagram_bytes() const noexcept { return maximum_datagram_bytes_; }
 
 private:
   [[nodiscard]] std::vector<uint8_t> make_packet(std::span<const uint8_t> payload,
-                                                 uint32_t timestamp,
-                                                 uint64_t capture_time_ns,
+                                                 uint32_t timestamp, uint64_t capture_time_ns,
                                                  bool marker);
 
   size_t maximum_datagram_bytes_{};
@@ -99,10 +99,8 @@ private:
   SequenceStats stats_{};
 };
 
-[[nodiscard]] uint32_t rtp_timestamp_for_frame(uint32_t initial_timestamp,
-                                               uint64_t frame_index,
-                                               uint32_t fps_numerator,
-                                               uint32_t fps_denominator);
+[[nodiscard]] uint32_t rtp_timestamp_for_frame(uint32_t initial_timestamp, uint64_t frame_index,
+                                               uint32_t fps_numerator, uint32_t fps_denominator);
 
 } // namespace v0
 } // namespace ipmx

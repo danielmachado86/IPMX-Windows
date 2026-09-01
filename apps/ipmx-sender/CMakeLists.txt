@@ -1,18 +1,25 @@
 find_package(X264 REQUIRED)
 
+add_library(ipmx_sender_codec STATIC
+  src/x264_encoder.cpp
+  src/frame_transmitter.cpp
+)
+add_library(ipmx::sender_codec ALIAS ipmx_sender_codec)
+target_include_directories(ipmx_sender_codec PUBLIC include)
+target_link_libraries(ipmx_sender_codec PUBLIC ipmx::core X264::X264
+  PRIVATE ipmx::project_options ipmx::project_warnings avrt winmm)
+
 add_executable(ipmx_sender
   src/main.cpp
   src/test_pattern.cpp
   src/wgc_capture.cpp
-  src/x264_encoder.cpp
 )
 set_target_properties(ipmx_sender PROPERTIES OUTPUT_NAME "ipmx-sender")
 target_include_directories(ipmx_sender PRIVATE include)
 target_link_libraries(ipmx_sender PRIVATE
-  ipmx::core
+  ipmx::sender_codec
   ipmx::project_options
   ipmx::project_warnings
-  X264::X264
   d3d11
   dxgi
   windowsapp

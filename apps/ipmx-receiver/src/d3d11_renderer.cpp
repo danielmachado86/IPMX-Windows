@@ -60,7 +60,7 @@ D3d11Renderer::D3d11Renderer(const uint32_t width, const uint32_t height)
   RegisterClassExW(&window_class);
   RECT rectangle{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
   AdjustWindowRect(&rectangle, WS_OVERLAPPEDWINDOW, FALSE);
-  state_->window = CreateWindowExW(0U, window_class.lpszClassName, L"IPMX Phase 0 Receiver",
+  state_->window = CreateWindowExW(0U, window_class.lpszClassName, L"IPMX H.264 Receiver",
                                    WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
                                    rectangle.right - rectangle.left, rectangle.bottom - rectangle.top,
                                    nullptr, nullptr, instance, nullptr);

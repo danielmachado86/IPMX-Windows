@@ -32,4 +32,5 @@ add_subdirectory(apps/ipmx-receiver)
 
 if(BUILD_TESTING)
   add_subdirectory(tests/IPMXCoreTests)
+  add_subdirectory(tests/IPMXConformanceTests)
 endif()

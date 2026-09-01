@@ -12,6 +12,9 @@ inline namespace v0 {
 
 inline constexpr size_t kMaximumUdpDatagramBytes = 65'507U;
 
+// Returns the SDP ts-refclk value for the selected IPv4 interface.
+[[nodiscard]] std::string local_mac_reference(std::string interface_address = "0.0.0.0");
+
 class MulticastSender {
 public:
   MulticastSender(std::string group, uint16_t port, std::string interface_address = "0.0.0.0");

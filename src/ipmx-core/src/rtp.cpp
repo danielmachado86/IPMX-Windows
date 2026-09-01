@@ -54,7 +54,8 @@ void write_u64(std::vector<uint8_t>& bytes, const size_t offset, const uint64_t 
 RtpPacketizer::RtpPacketizer(const size_t maximum_datagram_bytes, const uint8_t payload_type,
                              const std::optional<uint32_t> deterministic_seed)
     : maximum_datagram_bytes_(maximum_datagram_bytes), payload_type_(payload_type) {
-  if (maximum_datagram_bytes_ < 64U || maximum_datagram_bytes_ > 65'507U || payload_type_ > 127U) {
+  if (maximum_datagram_bytes_ < 64U ||
+      maximum_datagram_bytes_ > kMaximumStandardUdpPayloadBytes || payload_type_ > 127U) {
     throw std::invalid_argument("invalid RTP packetizer configuration");
   }
   std::random_device random_device;
@@ -67,12 +68,12 @@ RtpPacketizer::RtpPacketizer(const size_t maximum_datagram_bytes, const uint8_t 
 
 std::vector<uint8_t> RtpPacketizer::make_packet(const std::span<const uint8_t> payload,
                                                 const uint32_t timestamp,
-                                                const uint64_t capture_time_ns,
-                                                const bool marker) {
+                                                const uint64_t capture_time_ns, const bool marker) {
   constexpr size_t base_header_size = 12U;
   constexpr size_t extension_header_size = 4U;
   constexpr size_t extension_data_size = 12U;
-  constexpr size_t full_header_size = base_header_size + extension_header_size + extension_data_size;
+  constexpr size_t full_header_size =
+      base_header_size + extension_header_size + extension_data_size;
   std::vector<uint8_t> bytes(full_header_size + payload.size(), 0U);
   bytes[0] = 0x90U; // RTP v2, extension present, no CSRC.
   bytes[1] = static_cast<uint8_t>((marker ? 0x80U : 0U) | payload_type_);
@@ -83,13 +84,14 @@ std::vector<uint8_t> RtpPacketizer::make_packet(const std::span<const uint8_t> p
   write_u16(bytes, 14U, 3U); // Three 32-bit words follow.
   bytes[16U] = static_cast<uint8_t>((kCaptureTimeExtensionId << 4U) | 7U); // Eight bytes.
   write_u64(bytes, 17U, capture_time_ns);
-  std::copy(payload.begin(), payload.end(), bytes.begin() + static_cast<std::ptrdiff_t>(full_header_size));
+  std::copy(payload.begin(), payload.end(),
+            bytes.begin() + static_cast<std::ptrdiff_t>(full_header_size));
   return bytes;
 }
 
 std::vector<std::vector<uint8_t>> RtpPacketizer::packetize(const std::vector<NalUnit>& nals,
-                                                            const uint32_t timestamp,
-                                                            const uint64_t capture_time_ns) {
+                                                           const uint32_t timestamp,
+                                                           const uint64_t capture_time_ns) {
   constexpr size_t full_header_size = 28U;
   const size_t maximum_payload = maximum_datagram_bytes_ - full_header_size;
   if (maximum_payload <= 2U) {
@@ -231,7 +233,8 @@ std::optional<CompletedAccessUnit> H264Depacketizer::push(const ParsedRtpPacket&
     capture_time_ns_ = packet.capture_time_ns;
   }
 
-  if ((fragmented_ || !nals_.empty()) && static_cast<uint16_t>(last_sequence_ + 1U) != packet.sequence) {
+  if ((fragmented_ || !nals_.empty()) &&
+      static_cast<uint16_t>(last_sequence_ + 1U) != packet.sequence) {
     damaged_ = true;
   }
   last_sequence_ = packet.sequence;
@@ -258,7 +261,8 @@ std::optional<CompletedAccessUnit> H264Depacketizer::push(const ParsedRtpPacket&
         damaged_ = true;
       }
       fragment_.clear();
-      fragment_.push_back(static_cast<uint8_t>((packet.payload[0] & 0xE0U) | (packet.payload[1] & 0x1FU)));
+      fragment_.push_back(
+          static_cast<uint8_t>((packet.payload[0] & 0xE0U) | (packet.payload[1] & 0x1FU)));
       if (packet.payload.size() - 2U > kMaximumNalBytes - 1U) {
         damaged_ = true;
         fragmented_ = false;
@@ -290,7 +294,7 @@ std::optional<CompletedAccessUnit> H264Depacketizer::push(const ParsedRtpPacket&
       fragmented_ = false;
     }
   } else {
-    damaged_ = true; // Phase 0 supports only Single NAL and FU-A.
+    damaged_ = true; // This depacketizer supports only Single NAL and FU-A.
   }
 
   if (!packet.marker) {
@@ -344,8 +348,8 @@ uint32_t rtp_timestamp_for_frame(const uint32_t initial_timestamp, const uint64_
   if (fps_numerator == 0U || fps_denominator == 0U) {
     throw std::invalid_argument("frame rate must be non-zero");
   }
-  const uint64_t ticks = (frame_index * kRtpClockRate * fps_denominator + fps_numerator / 2U) /
-                         fps_numerator;
+  const uint64_t ticks =
+      (frame_index * kRtpClockRate * fps_denominator + fps_numerator / 2U) / fps_numerator;
   return initial_timestamp + static_cast<uint32_t>(ticks);
 }
 

@@ -1,12 +1,16 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 #include "ipmx/udp_multicast.hpp"
 
 #include <limits>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace ipmx {
 inline namespace v0 {
@@ -60,6 +64,48 @@ private:
 };
 
 } // namespace
+
+std::string local_mac_reference(const std::string interface_address) {
+  const in_addr requested = parse_ipv4(interface_address);
+  ULONG size = 0U;
+  constexpr ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                          GAA_FLAG_SKIP_DNS_SERVER;
+  if (GetAdaptersAddresses(AF_INET, flags, nullptr, nullptr, &size) != ERROR_BUFFER_OVERFLOW)
+    throw std::runtime_error("cannot enumerate network interfaces");
+  std::vector<uint8_t> storage(size);
+  auto* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
+  if (GetAdaptersAddresses(AF_INET, flags, nullptr, adapters, &size) != NO_ERROR)
+    throw std::runtime_error("cannot enumerate network interfaces");
+
+  const bool any = requested.s_addr == htonl(INADDR_ANY);
+  const IP_ADAPTER_ADDRESSES* selected = nullptr;
+  for (auto* adapter = adapters; adapter; adapter = adapter->Next) {
+    if (adapter->OperStatus != IfOperStatusUp || adapter->PhysicalAddressLength != 6U)
+      continue;
+    bool matches = any;
+    for (auto* unicast = adapter->FirstUnicastAddress; !matches && unicast;
+         unicast = unicast->Next) {
+      if (unicast->Address.lpSockaddr && unicast->Address.lpSockaddr->sa_family == AF_INET) {
+        const auto* address = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+        matches = address->sin_addr.s_addr == requested.s_addr;
+      }
+    }
+    if (matches) {
+      selected = adapter;
+      break;
+    }
+  }
+  if (!selected)
+    throw std::runtime_error("no active EUI-48 interface matches --interface");
+  std::ostringstream result;
+  result << "localmac=" << std::uppercase << std::hex << std::setfill('0');
+  for (ULONG index = 0U; index < selected->PhysicalAddressLength; ++index) {
+    if (index != 0U)
+      result << '-';
+    result << std::setw(2) << static_cast<unsigned>(selected->PhysicalAddress[index]);
+  }
+  return result.str();
+}
 
 struct MulticastSender::State {
   WinsockRuntime winsock;

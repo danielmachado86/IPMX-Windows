@@ -5,7 +5,7 @@ param(
 
     [Parameter()]
     [ValidateRange(10, 86400)]
-    [int]$DurationSeconds = 1800,
+    [int]$DurationSeconds = 90,
 
     [Parameter()]
     [ValidateSet("test", "screen")]
@@ -49,9 +49,10 @@ try {
     $sender = Start-Process -FilePath $senderPath -ArgumentList @(
         "--source", $Source,
         "--duration-seconds", $DurationSeconds,
-        "--sdp", $sdpPath
+        "--sdp", $sdpPath,
+        "--require-timing-compliance"
     ) -RedirectStandardOutput $senderLog -RedirectStandardError $senderError `
-      -WindowStyle Hidden -PassThru
+        -WindowStyle Hidden -PassThru
     $sdpDeadline = [datetime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $sdpPath) -and [datetime]::UtcNow -lt $sdpDeadline) {
         Start-Sleep -Milliseconds 100
@@ -76,10 +77,10 @@ try {
         $receiver.Refresh()
         if (-not $sender.HasExited -and -not $receiver.HasExited) {
             $samples.Add([pscustomobject]@{
-                Second = [math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
-                SenderWorkingSetMiB = [math]::Round($sender.WorkingSet64 / 1MB, 3)
-                ReceiverWorkingSetMiB = [math]::Round($receiver.WorkingSet64 / 1MB, 3)
-            })
+                    Second                = [math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+                    SenderWorkingSetMiB   = [math]::Round($sender.WorkingSet64 / 1MB, 3)
+                    ReceiverWorkingSetMiB = [math]::Round($receiver.WorkingSet64 / 1MB, 3)
+                })
         }
         Start-Sleep -Seconds 1
     }
@@ -97,30 +98,33 @@ try {
         $first = $steadySamples | Select-Object -First $window
         $last = $steadySamples | Select-Object -Last $window
         $senderGrowth = ($last | Measure-Object SenderWorkingSetMiB -Average).Average -
-                        ($first | Measure-Object SenderWorkingSetMiB -Average).Average
+        ($first | Measure-Object SenderWorkingSetMiB -Average).Average
         $receiverGrowth = ($last | Measure-Object ReceiverWorkingSetMiB -Average).Average -
-                          ($first | Measure-Object ReceiverWorkingSetMiB -Average).Average
+        ($first | Measure-Object ReceiverWorkingSetMiB -Average).Average
         $memoryPassed = $senderGrowth -le $MaximumGrowthMiB -and
-                        $receiverGrowth -le $MaximumGrowthMiB
+        $receiverGrowth -le $MaximumGrowthMiB
     }
     $receiverText = Get-Content -LiteralPath $receiverLog -Raw
+    $senderText = Get-Content -LiteralPath $senderLog -Raw
     $transportPassed = $receiver.ExitCode -eq 0 -and $receiverText.Contains("Receiver stopped: PASS")
+    $timingPassed = $sender.ExitCode -eq 0 -and $senderText.Contains("timing=PASS")
 
     [pscustomobject]@{
-        DurationSeconds = $DurationSeconds
-        WarmupSeconds = $effectiveWarmup
-        Samples = $samples.Count
-        SenderExitCode = $sender.ExitCode
-        ReceiverExitCode = $receiver.ExitCode
-        SenderGrowthMiB = [math]::Round($senderGrowth, 3)
+        DurationSeconds   = $DurationSeconds
+        WarmupSeconds     = $effectiveWarmup
+        Samples           = $samples.Count
+        SenderExitCode    = $sender.ExitCode
+        ReceiverExitCode  = $receiver.ExitCode
+        SenderGrowthMiB   = [math]::Round($senderGrowth, 3)
         ReceiverGrowthMiB = [math]::Round($receiverGrowth, 3)
-        TransportPassed = $transportPassed
-        MemoryPassed = $memoryPassed
-        Overall = $transportPassed -and $memoryPassed
-        OutputDirectory = $outputDirectory
+        TransportPassed   = $transportPassed
+        TimingPassed      = $timingPassed
+        MemoryPassed      = $memoryPassed
+        Overall           = $transportPassed -and $timingPassed -and $memoryPassed
+        OutputDirectory   = $outputDirectory
     } | Format-List
 
-    if (-not ($transportPassed -and $memoryPassed)) {
+    if (-not ($transportPassed -and $timingPassed -and $memoryPassed)) {
         exit 2
     }
 }

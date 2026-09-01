@@ -1,7 +1,7 @@
 # IPMX Windows
 
-Prototipo Windows/C++ de transporte H.264 sobre RTP multicast. La Fase 0 conecta un emisor y un
-receptor en la misma máquina y permite usar un patrón generado o Windows Graphics Capture.
+Implementación Windows/C++ de la Fase 1 de transporte H.264 sobre RTP multicast para IPMX. Produce
+H.264 Main o High 4:2:0/8-bit con VBR-HRD, VUI/SEI normativos, RTP limitado y SDP `TP=2110TPW`.
 
 ```text
 patrón o WGC -> BGRA -> NV12 -> x264 High/8-bit/4:2:0/sin B-frames
@@ -19,8 +19,9 @@ aplican convenciones propias de Windows, MSVC, CMake y vcpkg.
 apps/
   ipmx-sender/             WGC, patrón de prueba y x264
   ipmx-receiver/           Media Foundation y render D3D11
-src/ipmx-core/             Annex B, RTP, SDP, Winsock, color y métricas
+src/ipmx-core/             Annex B, RTP/RTCP, SDP, shaping, PCAP, Winsock, color y métricas
 tests/IPMXCoreTests/       pruebas unitarias del núcleo
+tests/IPMXConformanceTests/ x264/MF, golden bitstream y PCAP de conformidad
 cmake/                     configuración compartida de compilación
 scripts/                   build, loopback y estabilidad
 specs/                     documentos VSF de referencia
@@ -30,8 +31,9 @@ specs/                     documentos VSF de referencia
 
 `ipmx_core` no conoce Windows Graphics Capture, D3D11, Media Foundation ni x264. Contiene lógica
 transportable y comprobable mediante pruebas unitarias. `ipmx_sender` y `ipmx_receiver` actúan como
-adaptadores Windows y sus headers no forman parte de la API instalada. x264 se enlaza únicamente al
-emisor.
+adaptadores Windows y sus headers no forman parte de la API instalada. Los codecs viven en las
+bibliotecas estáticas `ipmx_sender_codec` e `ipmx_receiver_codec`, compartidas por aplicaciones y
+pruebas sin recompilar sus fuentes.
 
 Los headers públicos se incluyen desde `ipmx/<componente>.hpp`. El núcleo vive en `namespace ipmx`
 con `inline namespace v0`: los consumidores escriben `ipmx::RtpPacketizer`, mientras que
@@ -43,12 +45,15 @@ La dirección permitida de las dependencias es:
 
 ```text
 IPMXCoreTests --> ipmx_core
-ipmx_sender   --> ipmx_core + x264 + WGC/D3D11
-ipmx_receiver --> ipmx_core + Media Foundation/D3D11
+IPMXConformanceTests --> ipmx_sender_codec + ipmx_receiver_codec
+ipmx_sender_codec   --> ipmx_core + x264
+ipmx_receiver_codec --> ipmx_core + Media Foundation
+ipmx_sender         --> ipmx_sender_codec + WGC/D3D11
+ipmx_receiver       --> ipmx_receiver_codec + D3D11
 ```
 
-No se permiten dependencias en sentido contrario. Las futuras implementaciones de RTCP, PTP, NMOS
-o shaping deben incorporarse como módulos del núcleo o servicios separados, no dentro de los
+No se permiten dependencias en sentido contrario. Las futuras implementaciones de PTP, NMOS u otros
+servicios de transporte deben incorporarse como módulos del núcleo o servicios separados, no dentro de los
 archivos `main.cpp`.
 
 ### Convenciones Windows
@@ -61,6 +66,18 @@ archivos `main.cpp`.
   temporalmente una letra de unidad porque el sistema de build Unix de x264 no instala
   correctamente desde esas rutas.
 - Pruebas mediante CTest y automatización en GitHub Actions sobre Windows.
+
+### Nombres permanentes y fases del proyecto
+
+El código nombra **qué contrato implementa**, no **en qué fase del roadmap se añadió**. No se deben
+usar identificadores como `phase0`, `phase1` o `fase2` en headers instalados, APIs, mensajes de
+ejecución, targets o suites de pruebas permanentes, fixtures ni identificadores que lleguen al
+cable. Esos nombres caducan y fragmentan la conformidad según la historia del proyecto.
+
+Las fases sólo pertenecen al roadmap, encabezados de estado, historial de Git y artefactos
+temporales que se eliminan al cerrar un hito. La inestabilidad de la API se expresa únicamente con
+`inline namespace v0`; los validadores permanentes deben nombrar el estándar o contrato comprobado,
+por ejemplo `validate_ipmx_sps` y `validate_ipmx_sdp`.
 
 ## Requisitos
 
@@ -121,13 +138,13 @@ receptor:
 Use `--interface A.B.C.D` en ambos procesos si Windows elige una interfaz multicast distinta. El
 emisor configura TTL 1 y `IP_MULTICAST_LOOP=TRUE`; el receptor usa `IP_ADD_MEMBERSHIP`.
 
-## Criterio de salida de Fase 0
+## Criterio de salida de Fase 1
 
 La prueba prolongada ejecuta ambos procesos, guarda logs, mide el working set cada segundo y falla
 ante pérdida/reordenamiento, falta de cuadros o latencia, o crecimiento medio superior al umbral:
 
 ```powershell
-./scripts/run-stability.ps1 -DurationSeconds 1800 -Source test
+./scripts/run-stability.ps1 -DurationSeconds 90 -Source test
 ```
 
 Debe repetirse con `-Source screen`. La existencia del código y del runner no demuestra por sí sola
@@ -136,23 +153,28 @@ cero, memoria estable y latencia de captura a presentación reportada.
 
 ## Alcance actual
 
-La Fase 0 incluye BGRA a NV12, x264 High Profile sin B-frames, parsing Annex B, Single NAL/FU-A,
-RTP de 90 kHz, SSRC/secuencia, marker de access unit, multicast loopback, reconstrucción Annex B,
-decodificación Media Foundation, render D3D11 y SDP manual.
+La Fase 1 incluye BGRA a NV12; x264 Main/High 4:2:0/8-bit sin B-frames; VBR limitado con VBV y Type
+II NAL HRD; VUI BT.709 de rango estrecho; Buffering Period y Picture Timing SEI; parsing
+independiente de SPS/PPS/SEI; Single NAL/FU-A; RTP de 90 kHz con shaping TR-10-7; RTCP Sender
+Reports IPMX; `MAXUDP` configurable sin fragmentación IPv4; SDP IPMX; y golden H.264/PCAP
+comprobados en CTest.
 
-No incluye RTCP, PTP, NMOS, redundancia ni traffic shaping; por ello no debe presentarse todavía
-como un nodo IPMX conforme.
+No se incluyen un grandmaster PTP externo, NMOS, redundancia ni FEC; por ello la conformidad
+declarada se limita al bitstream y transporte de esta fase y no al nodo IPMX completo.
 
-## Diseño técnico de Fase 0
+## Diseño técnico de Fase 1
 
 ### Contrato de video
 
 - Cuadros progresivos y dimensiones pares.
 - Conversión BGRA a NV12 con coeficientes BT.709 y rango de estudio.
-- x264 `veryfast` y `zerolatency`, High Profile, entrada NV12 de 8 bits e `i_bframe=0`.
+- x264 `veryfast` y `zerolatency`, Main o High Profile, entrada NV12 de 8 bits e `i_bframe=0`.
 - GOP con IDR como máximo cada segundo y SPS/PPS repetidos en banda.
-- ABR con VBV aproximado de un cuadro para evitar ráfagas de un segundo. Esta fase no implementa
-  todavía el modelo HRD/IPMX ni shaping.
+- ABR/VBR con VBV aproximado de un cuadro, `X264_NAL_HRD_VBR`, un solo CPB y `cbr_flag=0`.
+- VUI con BT.709, rango estrecho, resolución y timing exacto (`num_units_in_tick=denominador`,
+  `time_scale=2*numerador`). El encoder se rechaza al inicio si el SPS real no cumple.
+- Buffering Period SEI en cada IDR y Picture Timing SEI en cada access unit. En ejecución se cuentan
+  y advierten las infracciones sin derribar el emisor; las pruebas siguen tratándolas como fallo.
 - WGC captura el monitor primario, excluye el cursor y conserva únicamente el cuadro más reciente,
   evitando que una sobrecarga genere una cola de latencia creciente.
 
@@ -167,13 +189,20 @@ El packetizer emite únicamente:
 - Single NAL Unit Packet para las NAL units que caben en el MTU configurado.
 - FU-A para las NAL units mayores, conservando F/NRI y los bits Start/End.
 
-No se emiten STAP-A, STAP-B, MTAP ni FU-B. El receptor descarta un access unit dañado o un modo de
-paquetización no soportado. El MTU predeterminado es 1200 bytes e incluye RTP y la extensión de
-medición.
+No se emiten STAP-A, STAP-B, MTAP ni FU-B. Por tanto, un paquete UDP nunca contiene más de un VCL
+NAL. El receptor descarta un access unit dañado o un modo no soportado. `MAXUDP` vale 1200 bytes por
+defecto, puede configurarse hasta 1460 e incluye RTP y la extensión de medición. Un hilo de red con
+cola acotada emite ráfagas de hasta `CMAX`, aplica un límite de deriva y mantiene el primer paquete
+de cada cuadro sobre el periodo nominal. La escritura PCAP ocurre en otro hilo.
+
+Antes del primer RTP de cada cuadro se envía a `media+1` un compound RTCP con Sender Report, IPMX
+Info Block, Media Info Block de vídeo comprimido `0x0005` y SDES CNAME. Sin una referencia PTP
+común, el SDP y el Info Block identifican el reloj interno con `ts-refclk:localmac`; las fuentes
+síncronas declaran `mediaclk:direct=0`.
 
 ### Medición de latencia
 
-La Fase 0 añade una extensión RTP local con perfil RFC 8285 `0xBEDE`, ID 1 y un timestamp monotónico
+La implementación conserva una extensión RTP local con perfil RFC 8285 `0xBEDE`, ID 1 y un timestamp monotónico
 de captura de 64 bits en nanosegundos. Como ambos procesos se ejecutan en la misma máquina, el
 receptor puede calcular la diferencia inmediatamente después de `IDXGISwapChain::Present`.
 
@@ -188,10 +217,22 @@ sustituir esta correlación local por el modelo temporal requerido por VSF TR-10
 
 ### SDP
 
-El emisor escribe el SDP manualmente después de inicializar x264. De este modo,
-`profile-level-id` y `sprop-parameter-sets` proceden de los SPS/PPS reales. El archivo también
-declara grupo, puerto, reloj de 90 kHz, packetization-mode 1, bitrate, resolución y frame rate. El
-receptor obtiene grupo, puerto, resolución y frame rate mediante `--sdp`.
+El emisor genera el SDP después de inicializar y validar x264. De este modo,
+`profile-level-id` y `sprop-parameter-sets` proceden de los SPS/PPS reales. El `fmtp` declara además
+resolución, profundidad, frame rate exacto, sampling, colorimetría, `TP=2110TPW`, `MAXUDP`, TCS,
+rango y `IPMX`. `b=AS` representa el máximo a nivel IP y `a=rtcp` reserva `media+1`. El parser
+recupera campos y SPS/PPS de forma tolerante; `validate_ipmx_sdp` produce por separado el
+informe de conformidad que usa el receptor. `a=framesize` se contrasta con `fmtp` y no lo sobrescribe.
+
+Opciones relevantes del emisor:
+
+```powershell
+ipmx-sender --profile high --bitrate-kbps 4000 --max-ip-bitrate-kbps 4400 `
+  --port 5004 --maxudp 1200 --sdp ipmx.sdp
+```
+
+`--dump-h264` y `--dump-pcap` permiten conservar artefactos de regresión. El PCAP usa LINKTYPE_RAW,
+incluye IPv4 con DF y conserva exactamente los datagramas RTP enviados.
 
 ### Contadores y aceptación
 
@@ -213,9 +254,23 @@ de latencia o la latencia máxima supera `--max-latency-ms` (250 ms de forma pre
 por proceso y puede cambiarse con `-MaximumGrowthMiB`; el calentamiento se controla mediante
 `-WarmupSeconds`. Cada ejecución conserva logs, SDP y CSV en un subdirectorio único bajo
 `out/build/windows-msvc/stability`.
+También activa el gate de temporización: en cualquier ventana de dos segundos, la diferencia entre
+el intervalo máximo y mínimo de los primeros paquetes de cuadro no puede superar 2 ms.
+
+### Golden media y pruebas
+
+`IPMXCoreTests` cubre SPS/PPS/SEI, VUI/HRD, puertos, SDP, pacing y RTP. `IPMXConformanceTests` abre
+los golden bajo `tests/IPMXConformanceTests/data`, valida cada paquete y codifica en vivo con x264. También
+comprueba que el decoder Media Foundation consume Main y High 4:2:0/8-bit.
+
+Para regenerar ambos goldens de forma explícita después de un cambio intencional de formato:
+
+```powershell
+./scripts/regenerate-goldens.ps1
+```
 
 ### Exclusiones conscientes
 
-No hay RTCP Sender Reports, IPMX Info Blocks, PTP, NMOS, redundancia, FEC, traffic shaping,
-sincronización entre streams ni manejo de cambios dinámicos de formato. Estas exclusiones coinciden
-con la definición de Fase 0, pero impiden afirmar conformidad completa con VSF TR-10-1/TR-10-7.
+No hay sincronización contra un grandmaster PTP externo, NMOS, redundancia, FEC, sincronización
+entre streams ni manejo de cambios dinámicos de formato. Son ampliaciones posteriores y siguen
+impidiendo afirmar conformidad completa de dispositivo con toda la familia VSF TR-10.

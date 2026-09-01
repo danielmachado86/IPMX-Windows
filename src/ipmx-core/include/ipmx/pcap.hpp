@@ -1,0 +1,46 @@
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace ipmx {
+inline namespace v0 {
+
+class PcapRtpWriter {
+public:
+  PcapRtpWriter(const std::filesystem::path& path, std::string source_address,
+                std::string destination_address, uint16_t source_port, uint16_t destination_port);
+  ~PcapRtpWriter();
+  PcapRtpWriter(const PcapRtpWriter&) = delete;
+  PcapRtpWriter& operator=(const PcapRtpWriter&) = delete;
+
+  void write(std::span<const uint8_t> udp_payload);
+  void write(std::span<const uint8_t> udp_payload, uint64_t unix_time_ns);
+
+private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
+class AsyncPcapRtpWriter {
+public:
+  AsyncPcapRtpWriter(const std::filesystem::path& path, std::string source_address,
+                     std::string destination_address, uint16_t source_port,
+                     uint16_t destination_port);
+  ~AsyncPcapRtpWriter();
+  AsyncPcapRtpWriter(const AsyncPcapRtpWriter&) = delete;
+  AsyncPcapRtpWriter& operator=(const AsyncPcapRtpWriter&) = delete;
+  void enqueue(std::vector<uint8_t> udp_payload);
+  void close();
+
+private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
+} // namespace v0
+} // namespace ipmx
