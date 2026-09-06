@@ -29,6 +29,7 @@ ipmx_configure_project_options()
 add_subdirectory(src/ipmx-core)
 add_subdirectory(apps/ipmx-sender)
 add_subdirectory(apps/ipmx-receiver)
+add_subdirectory(apps/ipmx-load)
 
 if(BUILD_TESTING)
   add_subdirectory(tests/IPMXCoreTests)

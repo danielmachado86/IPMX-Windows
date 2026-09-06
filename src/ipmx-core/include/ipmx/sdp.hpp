@@ -25,6 +25,7 @@ struct SdpSettings {
   uint16_t maximum_udp_bytes{1'200U};
   std::string ts_refclk;
   std::string media_clock{"direct=0"};
+  std::string source_address{"127.0.0.1"};
 };
 
 struct SdpDescription {
@@ -73,8 +74,7 @@ void write_sdp(const std::filesystem::path& path, const SdpSettings& settings, c
                const NalUnit& pps);
 [[nodiscard]] SdpSettings read_sdp(const std::filesystem::path& path);
 [[nodiscard]] SdpDescription read_sdp_description(const std::filesystem::path& path);
-[[nodiscard]] std::vector<std::string>
-validate_ipmx_sdp(const SdpDescription& description);
+[[nodiscard]] std::vector<std::string> validate_ipmx_sdp(const SdpDescription& description);
 
 } // namespace v0
 } // namespace ipmx

@@ -29,6 +29,8 @@ struct FrameTransmitterSettings {
   uint64_t access_unit_offset_ns{1'000'000U};
   std::filesystem::path pcap_path;
   size_t maximum_queued_frames{8U};
+  uint64_t late_packet_threshold_ns{1'000'000U};
+  uint8_t dscp{36U};
 };
 
 struct TransmitFrame {
@@ -44,7 +46,19 @@ struct FrameTransmitterStats {
   uint64_t rtcp_reports{};
   uint64_t maximum_sender_report_lateness_ns{};
   uint64_t maximum_encoder_cpb_lateness_ns{};
+  uint64_t maximum_packet_lateness_ns{};
+  uint64_t maximum_send_jitter_ns{};
   uint64_t maximum_interval_spread_ns{};
+  uint64_t late_packets{};
+  uint64_t ncm_violations{};
+  uint64_t current_cpb_occupancy_bytes{};
+  uint64_t maximum_cpb_occupancy_bytes{};
+  uint64_t current_queued_frames{};
+  uint64_t maximum_queued_frames{};
+  uint32_t configured_cmax{};
+  uint32_t maximum_cinst_observed{};
+  bool mmcss_registered{};
+  bool high_resolution_timer{};
   bool timing_window_observed{};
 };
 
@@ -60,16 +74,14 @@ struct IpmxSessionTiming {
   uint64_t access_unit_offset_ns{};
 };
 
-[[nodiscard]] IpmxSessionTiming
-resolve_ipmx_session_timing(uint32_t fps_numerator, uint32_t fps_denominator,
-                            std::optional<uint64_t> encoder_delay_ns,
-                            std::optional<uint64_t> sender_reports_delay_ns,
-                            uint64_t access_unit_offset_ns);
+[[nodiscard]] IpmxSessionTiming resolve_ipmx_session_timing(
+    uint32_t fps_numerator, uint32_t fps_denominator, std::optional<uint64_t> encoder_delay_ns,
+    std::optional<uint64_t> sender_reports_delay_ns, uint64_t access_unit_offset_ns);
 
 [[nodiscard]] IpmxFrameSchedule make_ipmx_frame_schedule(uint64_t capture_time_ns,
-                                                          uint64_t encoder_delay_ns,
-                                                          uint64_t sender_reports_delay_ns,
-                                                          uint64_t access_unit_offset_ns);
+                                                         uint64_t encoder_delay_ns,
+                                                         uint64_t sender_reports_delay_ns,
+                                                         uint64_t access_unit_offset_ns);
 
 class FrameTransmitter {
 public:

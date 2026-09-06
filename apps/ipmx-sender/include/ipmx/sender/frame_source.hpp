@@ -18,7 +18,8 @@ public:
 [[nodiscard]] std::unique_ptr<FrameSource> make_test_pattern_source(uint32_t width,
                                                                    uint32_t height,
                                                                    uint32_t fps_numerator,
-                                                                   uint32_t fps_denominator);
+                                                                   uint32_t fps_denominator,
+                                                                   bool stress = false);
 [[nodiscard]] std::unique_ptr<FrameSource> make_primary_monitor_source(uint32_t fps_numerator,
                                                                        uint32_t fps_denominator);
 

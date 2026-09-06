@@ -1,8 +1,9 @@
 # IPMX conformance golden media
 
 - `ipmx_golden.h264` is an Annex B H.264 High/4:2:0/8-bit VBR-HRD stream.
-- `ipmx_golden.pcap` is a LINKTYPE_RAW PCAP containing multicast RTP on port 5004 and the
-  corresponding per-frame IPMX RTCP Sender Reports on port 5005.
+- `ipmx_golden.pcap` is a LINKTYPE_ETHERNET PCAP containing multicast RTP on port 5004 and the
+  corresponding per-frame IPMX RTCP Sender Reports on port 5005, with AF42 marking and the RFC
+  1112 multicast destination MAC.
 
 The media fixtures are validated semantically so x264 implementation details, RTP randomization and
 capture timestamps do not make the regression test brittle. A deterministic RTCP compound packet is

@@ -188,7 +188,8 @@ std::string make_sdp(const SdpSettings& settings, const NalUnit& sps, const NalU
   if (settings.fps_numerator == 0U || settings.fps_denominator == 0U) {
     throw std::invalid_argument("invalid SDP frame rate");
   }
-  if (settings.ts_refclk.empty() || settings.media_clock.empty()) {
+  if (settings.ts_refclk.empty() || settings.media_clock.empty() ||
+      settings.source_address.empty()) {
     throw std::invalid_argument("SDP ts-refclk and mediaclk are required");
   }
   validate_ipmx_media_port(settings.port);
@@ -213,12 +214,14 @@ std::string make_sdp(const SdpSettings& settings, const NalUnit& sps, const NalU
     throw std::invalid_argument("H.264 SPS does not conform to the IPMX H.264 profile");
   std::ostringstream sdp;
   sdp << "v=0\r\n"
-      << "o=- 0 0 IN IP4 127.0.0.1\r\n"
+      << "o=- 1 1 IN IP4 " << settings.source_address << "\r\n"
       << "s=IPMX Windows H.264 loopback\r\n"
       << "c=IN IP4 " << settings.multicast_group << "/1\r\n"
       << "t=0 0\r\n"
       << "m=video " << settings.port << " RTP/AVP " << static_cast<unsigned>(settings.payload_type)
       << "\r\n"
+      << "a=source-filter: incl IN IP4 " << settings.multicast_group << ' '
+      << settings.source_address << "\r\n"
       << "b=AS:" << settings.maximum_ip_bitrate_kbps << "\r\n"
       << "a=rtcp:" << reserved_rtcp_port(settings.port) << " IN IP4 " << settings.multicast_group
       << "\r\n"
@@ -229,7 +232,10 @@ std::string make_sdp(const SdpSettings& settings, const NalUnit& sps, const NalU
       << ";height=" << settings.height << ";depth=8;exactframerate=" << settings.fps_numerator
       << '/' << settings.fps_denominator
       << ";sampling=YCbCr-4:2:0;colorimetry=BT709;TP=2110TPW;MAXUDP=" << settings.maximum_udp_bytes
-      << ";TCS=SDR;RANGE=NARROW;IPMX"
+      << ";TCS=SDR;RANGE=NARROW;measuredpixclk="
+      << (static_cast<uint64_t>(settings.width) * settings.height * settings.fps_numerator /
+          settings.fps_denominator)
+      << ";vtotal=" << settings.height << ";htotal=" << settings.width << ";IPMX"
       << ";packetization-mode=1;profile-level-id=" << profile_level_id(sps)
       << ";sprop-parameter-sets=" << base64(sps) << ',' << base64(pps) << "\r\n"
       << "a=framerate:" << std::fixed << std::setprecision(3)
@@ -307,8 +313,8 @@ SdpDescription read_sdp_description(const std::filesystem::path& path) {
       const auto space = line.find(' ');
       if (space == std::string::npos)
         throw std::runtime_error("invalid SDP rtpmap line");
-      description.rtpmap_payload_type = parse_integer<uint8_t>(
-          std::string_view(line).substr(9U, space - 9U), "RTP payload type");
+      description.rtpmap_payload_type =
+          parse_integer<uint8_t>(std::string_view(line).substr(9U, space - 9U), "RTP payload type");
       const std::string_view encoding = std::string_view(line).substr(space + 1U);
       const auto slash = encoding.find('/');
       if (slash == std::string_view::npos)
@@ -444,8 +450,8 @@ std::vector<std::string> validate_ipmx_sdp(const SdpDescription& description) {
               iequals(settings.media_clock, "sender/direct=0"),
           "missing synchronous a=mediaclk:direct=0");
   if (description.framesize_width && description.framesize_height) {
-    require(description.framesize_payload_type == settings.payload_type &&
-                description.fmtp_width && description.fmtp_height &&
+    require(description.framesize_payload_type == settings.payload_type && description.fmtp_width &&
+                description.fmtp_height &&
                 *description.framesize_width == *description.fmtp_width &&
                 *description.framesize_height == *description.fmtp_height,
             "a=framesize disagrees with fmtp width/height");
@@ -455,9 +461,9 @@ std::vector<std::string> validate_ipmx_sdp(const SdpDescription& description) {
     require(iequals(description.profile_level_id, profile_level_id(description.sps)),
             "profile-level-id does not match SPS");
     if (const auto parsed_sps = parse_h264_sps(description.sps)) {
-      const auto h264_errors = validate_ipmx_sps(
-          *parsed_sps,
-          {settings.width, settings.height, settings.fps_numerator, settings.fps_denominator});
+      const auto h264_errors =
+          validate_ipmx_sps(*parsed_sps, {settings.width, settings.height, settings.fps_numerator,
+                                          settings.fps_denominator});
       errors.insert(errors.end(), h264_errors.begin(), h264_errors.end());
     } else {
       errors.emplace_back("invalid SPS");

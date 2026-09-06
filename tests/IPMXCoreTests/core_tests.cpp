@@ -3,10 +3,12 @@
 #include "ipmx/h264.hpp"
 #include "ipmx/metrics.hpp"
 #include "ipmx/pcap.hpp"
-#include "ipmx/rtp.hpp"
 #include "ipmx/rtcp.hpp"
+#include "ipmx/rtp.hpp"
 #include "ipmx/sdp.hpp"
+#include "ipmx/timing.hpp"
 #include "ipmx/traffic_shaper.hpp"
+#include "ipmx/udp_multicast.hpp"
 
 #include <algorithm>
 #include <array>
@@ -16,9 +18,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <optional>
 #include <ranges>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -188,20 +190,28 @@ void test_ipmx_transport_constraints() {
   require(ipmx::is_valid_ipmx_media_port(5002U) && ipmx::reserved_rtcp_port(5002U) == 5003U,
           "IPMX RTP/RTCP port pair");
   require_throws([] { ipmx::validate_ipmx_media_port(5001U); }, "reject odd media port");
-  require(ipmx::is_valid_ipmx_media_port(2000U) &&
-              !ipmx::is_recommended_ipmx_media_port(2000U),
+  require(ipmx::is_valid_ipmx_media_port(2000U) && !ipmx::is_recommended_ipmx_media_port(2000U),
           "port above 1024 is valid but below the IPMX recommendation");
   require_throws([] { ipmx::validate_ipmx_media_port(1024U); }, "reject reserved low port");
   require_throws([] { ipmx::RtpPacketizer packetizer(1461U); }, "reject fragmenting MAXUDP");
 
   ipmx::Tr107TrafficShaper shaper(8'000U);
-  require(shaper.schedule_ns(100U, 972U) == 100U, "first shaped packet is immediate");
-  require(shaper.schedule_ns(100U, 972U) == 1'000'100U, "TR-10-7 leaky-bucket pacing");
+  for (uint32_t index = 0U; index < shaper.cmax(); ++index)
+    require(shaper.schedule_ns(100U, 972U) == 100U, "CMAX token bucket initial burst");
+  require(shaper.schedule_ns(100U, 972U) > 100U, "token bucket paces packets after CMAX");
   require(ipmx::tr107_cmax(10'000U) == 16U && ipmx::tr107_cmax(1'080'000U) == 50U,
           "TR-10-7 CMAX calculation");
   require(shaper.cmax() == 16U, "traffic shaper applies TR-10-7 CMAX");
   require(shaper.schedule_ns(1'000'000'000U, 972U) == 1'000'000'000U,
           "traffic shaper resets excessive accumulated drift");
+  ipmx::NetworkCompatibilityTracker ncm(1'000U, 16U);
+  for (uint32_t index = 0U; index < 16U; ++index)
+    ncm.observe(1'000U);
+  require(ncm.maximum_cinst() == 16U && ncm.violations() == 0U,
+          "network compatibility tracker accepts CMAX");
+  ncm.observe(1'000U);
+  require(ncm.maximum_cinst() == 17U && ncm.violations() == 1U,
+          "network compatibility tracker detects CMAX violation");
   ipmx::FrameIntervalTracker intervals;
   for (uint64_t index = 0U; index <= 120U; ++index)
     intervals.observe(index * 16'666'667U);
@@ -210,6 +220,15 @@ void test_ipmx_transport_constraints() {
   require(ipmx::minimum_ip_bitrate_kbps(4'000U, 1'200U) == 4'400U &&
               ipmx::minimum_ip_bitrate_kbps(4'000U, 64U) > 10'000U,
           "IP bitrate includes worst-case packet overhead");
+}
+
+void test_windows_timing() {
+  const uint64_t start = ipmx::qpc_now_ns();
+  ipmx::PreciseWaiter waiter;
+  const uint64_t deadline = start + 2'000'000U;
+  waiter.wait_until(deadline);
+  require(ipmx::qpc_now_ns() >= deadline && waiter.spin_window_ns() <= 500'000U,
+          "QPC clock and precise waiter");
 }
 
 void test_malformed_rtp_packets() {
@@ -287,6 +306,8 @@ void test_sdp_and_metrics() {
           "SDP fmtp");
   require(sdp.find("TP=2110TPW;MAXUDP=1200") != std::string::npos,
           "SDP traffic profile and MAXUDP");
+  require(sdp.find("measuredpixclk=55296000;vtotal=720;htotal=1280;IPMX") != std::string::npos,
+          "SDP IPMX signal totals and measured pixel clock");
   require(sdp.find("a=rtcp:5005") != std::string::npos, "SDP reserves RTCP port");
   require(sdp.find("a=ts-refclk:localmac=02-00-00-00-00-01") != std::string::npos &&
               sdp.find("a=mediaclk:direct=0") != std::string::npos,
@@ -294,6 +315,8 @@ void test_sdp_and_metrics() {
   require(sdp.find("a=extmap:1 " + std::string(ipmx::kCaptureTimeExtensionUri)) !=
               std::string::npos,
           "SDP capture-time extension");
+  require(ipmx::resolve_ipv4_source_address("239.10.20.30", 5004U, "192.0.2.10") == "192.0.2.10",
+          "explicit multicast source address is preserved");
 
   ipmx::SdpSettings settings;
   settings.multicast_group = "239.10.20.30";
@@ -365,10 +388,9 @@ void test_sdp_and_metrics() {
                 !ipmx::validate_ipmx_sdp(mismatch).empty(),
             "framesize is cross-checked and cannot overwrite fmtp dimensions");
     auto lowercase_tokens = ipmx::make_sdp(settings, reference_sps(), reference_pps());
-    for (const auto& [from, to] :
-         std::array<std::pair<std::string_view, std::string_view>, 4U>{
-             std::pair{"BT709", "bt709"}, std::pair{"SDR", "sdr"},
-             std::pair{"NARROW", "narrow"}, std::pair{"2110TPW", "2110tpw"}}) {
+    for (const auto& [from, to] : std::array<std::pair<std::string_view, std::string_view>, 4U>{
+             std::pair{"BT709", "bt709"}, std::pair{"SDR", "sdr"}, std::pair{"NARROW", "narrow"},
+             std::pair{"2110TPW", "2110tpw"}}) {
       const auto token = lowercase_tokens.find(from);
       require(token != std::string::npos, "locate case-insensitive SDP token");
       lowercase_tokens.replace(token, from.size(), to);
@@ -410,12 +432,11 @@ void test_ipmx_rtcp() {
   report.ts_refclk = "localmac=02-00-00-00-00-01";
   report.cname = "conformance@ipmx-windows";
   report.video = {1280U, 720U, 60U, 1U};
-  report.h264 = ipmx::make_ipmx_h264_media_info({0x67U, 0x64U, 0x00U, 0x20U},
-                                                 {0x68U, 0xAAU});
+  report.h264 = ipmx::make_ipmx_h264_media_info({0x67U, 0x64U, 0x00U, 0x20U}, {0x68U, 0xAAU});
   const auto compound = ipmx::make_ipmx_rtcp_compound(report);
   const auto inspected = ipmx::inspect_ipmx_rtcp_compound(compound);
-  require(inspected.sender_report && inspected.ipmx_info_block &&
-              inspected.compressed_video_info && inspected.h264_info && inspected.sdes_cname,
+  require(inspected.sender_report && inspected.ipmx_info_block && inspected.compressed_video_info &&
+              inspected.h264_info && inspected.sdes_cname,
           "compound RTCP contains SR, IPMX blocks 0x0005/0x000A, and SDES CNAME");
 
   ipmx::IpmxRtcpSenderReport golden;
@@ -429,10 +450,8 @@ void test_ipmx_rtcp() {
   golden.ts_refclk = "t";
   golden.media_clock = "m";
   golden.cname = "c";
-  golden.video = {16U, 8U, 1U, 1U, "YCbCr-4:2:0", "NARROW", "BT709", "SDR", 8U,
-                  128U, 20U, 10U};
-  golden.h264 = ipmx::make_ipmx_h264_media_info({0x67U, 0x64U, 0x00U, 0x20U},
-                                                 {0x68U, 0xAAU});
+  golden.video = {16U, 8U, 1U, 1U, "YCbCr-4:2:0", "NARROW", "BT709", "SDR", 8U, 128U, 20U, 10U};
+  golden.h264 = ipmx::make_ipmx_h264_media_info({0x67U, 0x64U, 0x00U, 0x20U}, {0x68U, 0xAAU});
   std::vector<uint8_t> expected;
   const auto append_hex = [&expected](const char* text) {
     std::istringstream input(text);
@@ -445,27 +464,24 @@ void test_ipmx_rtcp() {
   expected.insert(expected.end(), 63U, 0U);
   expected.push_back('m');
   expected.insert(expected.end(), 11U, 0U);
-  append_hex(
-      "00 05 00 16 59 43 62 43 72 2D 34 3A 32 3A 30 00 00 00 00 00 08 00 01 01 "
-      "4E 41 52 52 4F 57 00 00 00 00 00 00 42 54 37 30 39 00 00 00 00 00 00 00 "
-      "00 00 00 00 00 00 00 00 53 44 52 00 00 00 00 00 00 00 00 00 00 00 00 00 "
-      "00 10 00 08 00 00 04 01 00 00 00 00 00 00 00 80 00 14 00 0A 00 0A 00 0A "
-      "00 00 00 43 64 00 20 01 00 00 00 00 00 00 00 00 00 00 00 00 0D 00 00 00 "
-      "5A 32 51 41 49 41 3D 3D 2C 61 4B 6F 3D 00 00 00 81 CA 00 02 11 22 33 44 "
-      "01 01 63 00");
+  append_hex("00 05 00 16 59 43 62 43 72 2D 34 3A 32 3A 30 00 00 00 00 00 08 00 01 01 "
+             "4E 41 52 52 4F 57 00 00 00 00 00 00 42 54 37 30 39 00 00 00 00 00 00 00 "
+             "00 00 00 00 00 00 00 00 53 44 52 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+             "00 10 00 08 00 00 04 01 00 00 00 00 00 00 00 80 00 14 00 0A 00 0A 00 0A "
+             "00 00 00 43 64 00 20 01 00 00 00 00 00 00 00 00 00 00 00 00 0D 00 00 00 "
+             "5A 32 51 41 49 41 3D 3D 2C 61 4B 6F 3D 00 00 00 81 CA 00 02 11 22 33 44 "
+             "01 01 63 00");
   const auto actual = ipmx::make_ipmx_rtcp_compound(golden);
   if (actual != expected) {
     const size_t common = std::min(actual.size(), expected.size());
     const auto mismatch = std::mismatch(actual.begin(), actual.begin() + common, expected.begin());
     const size_t offset = static_cast<size_t>(mismatch.first - actual.begin());
-    throw std::runtime_error("IPMX H.264 RTCP byte mismatch at offset " +
-                             std::to_string(offset) + ", actual size " +
-                             std::to_string(actual.size()) + ", expected size " +
+    throw std::runtime_error("IPMX H.264 RTCP byte mismatch at offset " + std::to_string(offset) +
+                             ", actual size " + std::to_string(actual.size()) + ", expected size " +
                              std::to_string(expected.size()));
   }
   const auto golden_inspection = ipmx::inspect_ipmx_rtcp_compound(actual);
-  require(golden_inspection.block_version == 7U &&
-              golden_inspection.rtp_timestamp == 0x090A0B0CU &&
+  require(golden_inspection.block_version == 7U && golden_inspection.rtp_timestamp == 0x090A0B0CU &&
               golden_inspection.packet_count == 0x0D0E0F10U &&
               golden_inspection.octet_count == 0x11121314U,
           "RTCP inspection recovers version, timestamp, and sender counters");
@@ -487,6 +503,7 @@ int main() {
     test_sequence_and_clock();
     test_h264_syntax_and_conformance();
     test_ipmx_transport_constraints();
+    test_windows_timing();
     test_malformed_rtp_packets();
     test_depacketizer_damage_paths();
     test_sdp_and_metrics();

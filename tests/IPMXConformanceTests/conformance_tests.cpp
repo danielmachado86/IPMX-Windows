@@ -98,7 +98,7 @@ void test_golden_pcap() {
   const auto bytes =
       read_file(std::filesystem::path(IPMX_CONFORMANCE_TEST_DATA_DIR) / "ipmx_golden.pcap");
   require(bytes.size() >= 24U && read_u32_le(bytes, 0U) == 0xA1B2C3D4U &&
-              read_u32_le(bytes, 20U) == 101U,
+              read_u32_le(bytes, 20U) == 1U,
           "golden PCAP header");
   size_t offset = 24U;
   size_t packets = 0U;
@@ -111,11 +111,15 @@ void test_golden_pcap() {
     require(offset + 16U <= bytes.size(), "complete PCAP record header");
     const uint32_t captured = read_u32_le(bytes, offset + 8U);
     offset += 16U;
-    require(captured >= 28U && offset + captured <= bytes.size(), "complete PCAP packet");
-    const std::span<const uint8_t> ip_packet(bytes.data() + offset, captured);
+    require(captured >= 42U && offset + captured <= bytes.size(), "complete PCAP packet");
+    const std::span<const uint8_t> ethernet(bytes.data() + offset, captured);
+    require(read_u16_be(ethernet, 12U) == 0x0800U, "golden packet carries IPv4 Ethernet");
+    require(ethernet[0] == 0x01U && ethernet[1] == 0x00U && ethernet[2] == 0x5EU,
+            "golden packet uses multicast destination MAC");
+    const std::span<const uint8_t> ip_packet = ethernet.subspan(14U);
     require((ip_packet[0] >> 4U) == 4U && (ip_packet[0] & 0x0FU) == 5U,
             "golden packet is IPv4 without options");
-    require(read_u16_be(ip_packet, 2U) == captured && captured <= 1488U,
+    require(read_u16_be(ip_packet, 2U) == ip_packet.size() && captured <= 1502U,
             "golden packet avoids IPv4 fragmentation");
     require((read_u16_be(ip_packet, 6U) & 0x4000U) != 0U, "golden packet has DF set");
     require(ip_packet[9] == 17U, "golden transport is UDP");
@@ -124,8 +128,7 @@ void test_golden_pcap() {
       const std::vector<uint8_t> rtcp(ip_packet.begin() + 28, ip_packet.end());
       const auto inspection = ipmx::inspect_ipmx_rtcp_compound(rtcp);
       require(inspection.sender_report && inspection.ipmx_info_block &&
-                  inspection.compressed_video_info && inspection.h264_info &&
-                  inspection.sdes_cname,
+                  inspection.compressed_video_info && inspection.h264_info && inspection.sdes_cname,
               "golden RTCP has complete IPMX H.264 info");
       require(inspection.packet_count == packets && inspection.octet_count == payload_octets,
               "golden sender counters cover all preceding RTP packets");
@@ -158,22 +161,22 @@ void test_golden_pcap() {
 void test_h264_sender_report_schedule() {
   const auto defaults =
       ipmx::sender::resolve_ipmx_session_timing(60U, 1U, std::nullopt, std::nullopt, 1'000'000U);
-  require(defaults.encoder_delay_ns == 16'666'667U &&
+  require(defaults.encoder_delay_ns == 50'000'001U &&
               defaults.sender_reports_delay_ns == defaults.encoder_delay_ns &&
               defaults.access_unit_offset_ns == 1'000'000U,
-          "default encoder delay is one frame period and remains constant for sender reports");
+          "default encoder delay is three frame periods and remains constant for sender reports");
   const auto first = ipmx::sender::make_ipmx_frame_schedule(1'000U, 300U, 200U, 50U);
   const auto second = ipmx::sender::make_ipmx_frame_schedule(2'000U, 300U, 200U, 50U);
-  require(first.sender_report_time_ns == 1'200U &&
-              first.encoder_cpb_insertion_time_ns == 1'300U && first.first_rtp_time_ns == 1'350U,
+  require(first.sender_report_time_ns == 1'200U && first.encoder_cpb_insertion_time_ns == 1'300U &&
+              first.first_rtp_time_ns == 1'350U,
           "H.264 frame schedule uses the configured session delays");
   require(second.sender_report_time_ns - first.sender_report_time_ns == 1'000U &&
               second.encoder_cpb_insertion_time_ns - first.encoder_cpb_insertion_time_ns == 1'000U,
           "encoder_delay and sender_reports_delay remain constant across frames");
   const auto zero_delay = ipmx::sender::resolve_ipmx_session_timing(60U, 1U, 0U, 0U, 0U);
-  const auto immediate = ipmx::sender::make_ipmx_frame_schedule(
-      1'000U, zero_delay.encoder_delay_ns, zero_delay.sender_reports_delay_ns,
-      zero_delay.access_unit_offset_ns);
+  const auto immediate = ipmx::sender::make_ipmx_frame_schedule(1'000U, zero_delay.encoder_delay_ns,
+                                                                zero_delay.sender_reports_delay_ns,
+                                                                zero_delay.access_unit_offset_ns);
   require(immediate.sender_report_time_ns == 1'000U &&
               immediate.encoder_cpb_insertion_time_ns == 1'000U &&
               immediate.first_rtp_time_ns == 1'000U,

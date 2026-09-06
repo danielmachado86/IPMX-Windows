@@ -8,9 +8,9 @@
 #include <exception>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
-#include <mutex>
 #include <vector>
 
 namespace ipmx {
@@ -78,16 +78,20 @@ struct PcapRtpWriter::State {
   uint16_t source_port{};
   uint16_t destination_port{};
   uint16_t identification{};
+  uint8_t dscp{};
 };
 
 PcapRtpWriter::PcapRtpWriter(const std::filesystem::path& path, std::string source_address,
                              std::string destination_address, const uint16_t source_port,
-                             const uint16_t destination_port)
+                             const uint16_t destination_port, const uint8_t dscp)
     : state_(std::make_unique<State>()) {
+  if (dscp > 63U)
+    throw std::invalid_argument("DSCP must be in the range 0..63");
   state_->source = parse_ipv4(source_address);
   state_->destination = parse_ipv4(destination_address);
   state_->source_port = source_port;
   state_->destination_port = destination_port;
+  state_->dscp = dscp;
   state_->output.open(path, std::ios::binary | std::ios::trunc);
   if (!state_->output)
     throw std::runtime_error("cannot create PCAP file");
@@ -97,7 +101,7 @@ PcapRtpWriter::PcapRtpWriter(const std::filesystem::path& path, std::string sour
   write_u32_le(state_->output, 0U);
   write_u32_le(state_->output, 0U);
   write_u32_le(state_->output, 65'535U);
-  write_u32_le(state_->output, 101U); // LINKTYPE_RAW: packet starts with an IPv4 header.
+  write_u32_le(state_->output, 1U); // LINKTYPE_ETHERNET.
 }
 
 PcapRtpWriter::~PcapRtpWriter() = default;
@@ -117,20 +121,37 @@ void PcapRtpWriter::write(const std::span<const uint8_t> udp_payload, const uint
   if (udp_payload.size() > std::numeric_limits<uint16_t>::max() - 28U) {
     throw std::length_error("UDP packet is too large for IPv4 PCAP");
   }
-  std::vector<uint8_t> packet(28U + udp_payload.size(), 0U);
-  packet[0] = 0x45U;
-  write_u16_be(packet, 2U, static_cast<uint16_t>(packet.size()));
-  write_u16_be(packet, 4U, state_->identification++);
-  write_u16_be(packet, 6U, 0x4000U); // Don't Fragment.
-  packet[8] = 64U;
-  packet[9] = 17U;
-  std::copy(state_->source.begin(), state_->source.end(), packet.begin() + 12);
-  std::copy(state_->destination.begin(), state_->destination.end(), packet.begin() + 16);
-  write_u16_be(packet, 10U, ipv4_checksum(std::span<const uint8_t>(packet.data(), 20U)));
-  write_u16_be(packet, 20U, source_port);
-  write_u16_be(packet, 22U, destination_port);
-  write_u16_be(packet, 24U, static_cast<uint16_t>(udp_payload.size() + 8U));
-  std::copy(udp_payload.begin(), udp_payload.end(), packet.begin() + 28);
+  constexpr size_t ethernet_bytes = 14U;
+  constexpr size_t ip_bytes = 20U;
+  constexpr size_t udp_bytes = 8U;
+  std::vector<uint8_t> packet(ethernet_bytes + ip_bytes + udp_bytes + udp_payload.size(), 0U);
+  packet[0] = 0x01U;
+  packet[1] = 0x00U;
+  packet[2] = 0x5EU;
+  packet[3] = static_cast<uint8_t>(state_->destination[1] & 0x7FU);
+  packet[4] = state_->destination[2];
+  packet[5] = state_->destination[3];
+  packet[6] = 0x02U; // Locally administered source MAC for the diagnostic capture.
+  packet[11] = 0x01U;
+  write_u16_be(packet, 12U, 0x0800U);
+
+  const size_t ip = ethernet_bytes;
+  packet[ip] = 0x45U;
+  packet[ip + 1U] = static_cast<uint8_t>(state_->dscp << 2U);
+  write_u16_be(packet, ip + 2U, static_cast<uint16_t>(ip_bytes + udp_bytes + udp_payload.size()));
+  write_u16_be(packet, ip + 4U, state_->identification++);
+  write_u16_be(packet, ip + 6U, 0x4000U); // Don't Fragment.
+  packet[ip + 8U] = 64U;
+  packet[ip + 9U] = 17U;
+  std::copy(state_->source.begin(), state_->source.end(), packet.begin() + ip + 12U);
+  std::copy(state_->destination.begin(), state_->destination.end(), packet.begin() + ip + 16U);
+  write_u16_be(packet, ip + 10U,
+               ipv4_checksum(std::span<const uint8_t>(packet.data() + ip, ip_bytes)));
+  const size_t udp = ip + ip_bytes;
+  write_u16_be(packet, udp, source_port);
+  write_u16_be(packet, udp + 2U, destination_port);
+  write_u16_be(packet, udp + 4U, static_cast<uint16_t>(udp_payload.size() + udp_bytes));
+  std::copy(udp_payload.begin(), udp_payload.end(), packet.begin() + udp + udp_bytes);
 
   write_u32_le(state_->output, static_cast<uint32_t>(unix_time_ns / 1'000'000'000U));
   write_u32_le(state_->output, static_cast<uint32_t>((unix_time_ns % 1'000'000'000U) / 1'000U));
@@ -162,20 +183,19 @@ struct AsyncPcapRtpWriter::State {
 
   State(const std::filesystem::path& path, std::string source_address,
         std::string destination_address, const uint16_t source_port,
-        const uint16_t destination_port)
+        const uint16_t destination_port, const uint8_t dscp)
       : writer(path, std::move(source_address), std::move(destination_address), source_port,
-               destination_port),
+               destination_port, dscp),
         source_port(source_port), destination_port(destination_port) {}
 };
 
 AsyncPcapRtpWriter::AsyncPcapRtpWriter(const std::filesystem::path& path,
-                                       std::string source_address,
-                                       std::string destination_address,
-                                       const uint16_t source_port,
-                                       const uint16_t destination_port)
+                                       std::string source_address, std::string destination_address,
+                                       const uint16_t source_port, const uint16_t destination_port,
+                                       const uint8_t dscp)
     : state_(std::make_unique<State>(path, std::move(source_address),
-                                     std::move(destination_address), source_port,
-                                     destination_port)) {
+                                     std::move(destination_address), source_port, destination_port,
+                                     dscp)) {
   State* state = state_.get();
   state_->worker = std::thread([state] {
     try {
@@ -220,6 +240,11 @@ void AsyncPcapRtpWriter::enqueue(std::vector<uint8_t> udp_payload, const uint16_
   const auto now = std::chrono::system_clock::now().time_since_epoch();
   const uint64_t unix_time_ns =
       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+  enqueue(std::move(udp_payload), unix_time_ns, source_port, destination_port);
+}
+
+void AsyncPcapRtpWriter::enqueue(std::vector<uint8_t> udp_payload, const uint64_t unix_time_ns,
+                                 const uint16_t source_port, const uint16_t destination_port) {
   std::lock_guard lock(state_->mutex);
   if (state_->error)
     std::rethrow_exception(state_->error);
@@ -230,8 +255,7 @@ void AsyncPcapRtpWriter::enqueue(std::vector<uint8_t> udp_payload, const uint16_
     ++state_->dropped;
     return;
   }
-  state_->entries.push_back(
-      {std::move(udp_payload), unix_time_ns, source_port, destination_port});
+  state_->entries.push_back({std::move(udp_payload), unix_time_ns, source_port, destination_port});
   state_->ready.notify_one();
 }
 

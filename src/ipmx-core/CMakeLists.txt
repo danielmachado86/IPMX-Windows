@@ -6,6 +6,7 @@ add_library(ipmx_core STATIC
   src/rtp.cpp
   src/rtcp.cpp
   src/sdp.cpp
+  src/timing.cpp
   src/traffic_shaper.cpp
   src/udp_multicast.cpp
 )

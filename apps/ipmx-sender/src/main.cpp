@@ -1,8 +1,9 @@
 #include "ipmx/bgra_to_nv12.hpp"
 #include "ipmx/rtp.hpp"
-#include "ipmx/sender/frame_transmitter.hpp"
 #include "ipmx/sdp.hpp"
 #include "ipmx/sender/frame_source.hpp"
+#include "ipmx/sender/frame_transmitter.hpp"
+#include "ipmx/sender/metrics_export.hpp"
 #include "ipmx/sender/x264_encoder.hpp"
 #include "ipmx/udp_multicast.hpp"
 
@@ -17,11 +18,11 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <optional>
 
 namespace {
 
@@ -49,10 +50,14 @@ struct Options {
   std::filesystem::path sdp{"ipmx.sdp"};
   std::filesystem::path dump_h264;
   std::filesystem::path dump_pcap;
+  std::filesystem::path metrics_csv;
+  std::filesystem::path metrics_json;
   std::string ts_refclk;
   std::optional<uint64_t> encoder_delay_ns;
   std::optional<uint64_t> sender_reports_delay_ns;
   std::optional<uint64_t> access_unit_offset_ns;
+  uint64_t late_packet_threshold_ns{1'000'000U};
+  uint8_t dscp{36U};
   bool require_timing_compliance{};
 };
 
@@ -79,12 +84,14 @@ template <typename T>
   for (int index = 1; index < argc; ++index) {
     const std::string_view key(argv[index]);
     if (key == "--help") {
-      std::cout << "ipmx-sender [--source test|screen] [--width N] [--height N] "
+      std::cout << "ipmx-sender [--source test|stress|screen] [--width N] [--height N] "
                    "[--fps N] [--bitrate-kbps N] [--profile main|high] [--max-ip-bitrate-kbps N] "
                    "[--group A.B.C.D] [--port N] [--interface A.B.C.D] [--maxudp N] "
                    "[--ts-refclk VALUE] [--encoder-delay-us N] [--sender-reports-delay-us N] "
                    "[--access-unit-offset-us N] [--duration-seconds N] [--sdp PATH] "
-                   "[--dump-h264 PATH] [--dump-pcap PATH] [--require-timing-compliance]\n";
+                   "[--dump-h264 PATH] [--dump-pcap PATH] [--metrics-csv PATH] "
+                   "[--metrics-json PATH] [--late-packet-threshold-us N] [--dscp N] "
+                   "[--require-timing-compliance]\n";
       std::exit(0);
     }
     if (key == "--require-timing-compliance") {
@@ -130,6 +137,10 @@ template <typename T>
       options.dump_h264 = value;
     else if (key == "--dump-pcap")
       options.dump_pcap = value;
+    else if (key == "--metrics-csv")
+      options.metrics_csv = value;
+    else if (key == "--metrics-json")
+      options.metrics_json = value;
     else if (key == "--ts-refclk")
       options.ts_refclk = value;
     else if (key == "--encoder-delay-us")
@@ -138,24 +149,31 @@ template <typename T>
       options.sender_reports_delay_ns = parse_delay_us(value, "--sender-reports-delay-us");
     else if (key == "--access-unit-offset-us")
       options.access_unit_offset_ns = parse_delay_us(value, "--access-unit-offset-us");
+    else if (key == "--late-packet-threshold-us")
+      options.late_packet_threshold_ns = parse_delay_us(value, "--late-packet-threshold-us");
+    else if (key == "--dscp")
+      options.dscp = parse_number<uint8_t>(value, "--dscp");
     else
       throw std::invalid_argument("unknown option: " + std::string(key));
   }
-  if (options.source != "test" && options.source != "screen") {
-    throw std::invalid_argument("--source must be test or screen");
+  if (options.source != "test" && options.source != "stress" && options.source != "screen") {
+    throw std::invalid_argument("--source must be test, stress or screen");
   }
   ipmx::validate_ipmx_media_port(options.port);
   if (!ipmx::is_recommended_ipmx_media_port(options.port))
     std::cerr << "warning: IPMX recommends an RTP media port greater than 5000\n";
   if (options.maximum_udp_bytes < 64U ||
       options.maximum_udp_bytes > ipmx::kMaximumStandardUdpPayloadBytes) {
-    throw std::invalid_argument(
-        "--maxudp must be between 64 and " +
-        std::to_string(ipmx::kMaximumStandardUdpPayloadBytes) +
-        " to avoid IPv4 fragmentation");
+    throw std::invalid_argument("--maxudp must be between 64 and " +
+                                std::to_string(ipmx::kMaximumStandardUdpPayloadBytes) +
+                                " to avoid IPv4 fragmentation");
   }
   if (options.bitrate_kbps == 0U)
     throw std::invalid_argument("--bitrate-kbps must be non-zero");
+  if (options.late_packet_threshold_ns == 0U)
+    throw std::invalid_argument("--late-packet-threshold-us must be non-zero");
+  if (options.dscp > 63U)
+    throw std::invalid_argument("--dscp must be in the range 0..63");
   const uint32_t required_ip_bitrate =
       ipmx::minimum_ip_bitrate_kbps(options.bitrate_kbps, options.maximum_udp_bytes);
   if (options.maximum_ip_bitrate_kbps == 0U) {
@@ -180,15 +198,17 @@ int main(const int argc, char** argv) {
             ? ipmx::sender::make_primary_monitor_source(options.fps_numerator,
                                                         options.fps_denominator)
             : ipmx::sender::make_test_pattern_source(
-                  options.width, options.height, options.fps_numerator, options.fps_denominator);
+                  options.width, options.height, options.fps_numerator, options.fps_denominator,
+                  options.source == "stress");
     const ipmx::sender::EncoderSettings encoder_settings{
         source->width(),         source->height(),     options.fps_numerator,
         options.fps_denominator, options.bitrate_kbps, options.profile};
     ipmx::sender::X264Encoder encoder(encoder_settings);
     ipmx::RtpPacketizer packetizer(options.maximum_udp_bytes);
-    const std::string ts_refclk = options.ts_refclk.empty()
-                                      ? ipmx::local_mac_reference(options.interface_address)
-                                      : options.ts_refclk;
+    const std::string source_address =
+        ipmx::resolve_ipv4_source_address(options.group, options.port, options.interface_address);
+    const std::string ts_refclk =
+        options.ts_refclk.empty() ? ipmx::local_mac_reference(source_address) : options.ts_refclk;
     ipmx::SdpSettings sdp_settings{options.group,
                                    options.port,
                                    ipmx::kH264PayloadType,
@@ -200,7 +220,8 @@ int main(const int argc, char** argv) {
                                    options.maximum_ip_bitrate_kbps,
                                    options.maximum_udp_bytes,
                                    ts_refclk,
-                                   "direct=0"};
+                                   "direct=0",
+                                   source_address};
     ipmx::write_sdp(options.sdp, sdp_settings, encoder.sps(), encoder.pps());
     std::ofstream bitstream;
     if (!options.dump_h264.empty()) {
@@ -212,7 +233,7 @@ int main(const int argc, char** argv) {
     const uint32_t initial_timestamp = (static_cast<uint32_t>(random()) << 16U) ^ random();
     ipmx::sender::FrameTransmitterSettings transmitter_settings;
     transmitter_settings.multicast_group = options.group;
-    transmitter_settings.interface_address = options.interface_address;
+    transmitter_settings.interface_address = source_address;
     transmitter_settings.media_port = options.port;
     transmitter_settings.maximum_udp_bytes = options.maximum_udp_bytes;
     transmitter_settings.maximum_ip_bitrate_kbps = options.maximum_ip_bitrate_kbps;
@@ -220,13 +241,15 @@ int main(const int argc, char** argv) {
     transmitter_settings.ts_refclk = ts_refclk;
     transmitter_settings.cname = ts_refclk + "@ipmx-windows";
     transmitter_settings.video = {source->width(), source->height(), options.fps_numerator,
-                                   options.fps_denominator};
+                                  options.fps_denominator};
     transmitter_settings.h264 = ipmx::make_ipmx_h264_media_info(encoder.sps(), encoder.pps());
     transmitter_settings.encoder_delay_ns = options.encoder_delay_ns;
     transmitter_settings.sender_reports_delay_ns = options.sender_reports_delay_ns;
     if (options.access_unit_offset_ns)
       transmitter_settings.access_unit_offset_ns = *options.access_unit_offset_ns;
     transmitter_settings.pcap_path = options.dump_pcap;
+    transmitter_settings.late_packet_threshold_ns = options.late_packet_threshold_ns;
+    transmitter_settings.dscp = options.dscp;
     ipmx::sender::FrameTransmitter transmitter(std::move(transmitter_settings));
     const auto session_timing = transmitter.timing();
     uint64_t frame_index = 0U;
@@ -236,8 +259,7 @@ int main(const int argc, char** argv) {
               << " @ " << options.fps_numerator << " fps -> " << options.group << ':'
               << options.port << " SSRC=" << packetizer.ssrc() << " SDP=" << options.sdp.string()
               << " encoder_delay_ms=" << session_timing.encoder_delay_ns / 1'000'000.0
-              << " sender_reports_delay_ms="
-              << session_timing.sender_reports_delay_ns / 1'000'000.0
+              << " sender_reports_delay_ms=" << session_timing.sender_reports_delay_ns / 1'000'000.0
               << " access_unit_offset_ms=" << session_timing.access_unit_offset_ns / 1'000'000.0
               << '\n';
 
@@ -268,9 +290,9 @@ int main(const int argc, char** argv) {
       }
       const uint32_t timestamp = ipmx::rtp_timestamp_for_frame(
           initial_timestamp, frame_index, options.fps_numerator, options.fps_denominator);
-      transmitter.enqueue({timestamp, cached_nv12->capture_time_ns,
-                           packetizer.packetize(access_unit.nals, timestamp,
-                                                cached_nv12->capture_time_ns)});
+      transmitter.enqueue(
+          {timestamp, cached_nv12->capture_time_ns,
+           packetizer.packetize(access_unit.nals, timestamp, cached_nv12->capture_time_ns)});
       ++frame_index;
 
       if (now - last_report >= std::chrono::seconds(1)) {
@@ -291,17 +313,31 @@ int main(const int argc, char** argv) {
     const double encoder_cpb_lateness_ms =
         static_cast<double>(stats.maximum_encoder_cpb_lateness_ns) / 1'000'000.0;
     const bool timing_compliant = stats.timing_window_observed && jitter_ms <= 2.0;
+    const bool shaper_compliant = stats.ncm_violations == 0U && stats.late_packets == 0U &&
+                                  stats.maximum_cinst_observed <= stats.configured_cmax;
     std::cout << "Sender stopped: frames=" << frame_index << " sent=" << stats.frames
               << " packets=" << stats.packets << " rtcp=" << stats.rtcp_reports
-               << " frame_interval_spread_ms=" << jitter_ms
-               << " sender_report_lateness_ms=" << sender_report_lateness_ms
-               << " encoder_cpb_lateness_ms=" << encoder_cpb_lateness_ms
-               << " timing=" << (timing_compliant ? "PASS" : "FAIL")
+              << " frame_interval_spread_ms=" << jitter_ms
+              << " sender_report_lateness_ms=" << sender_report_lateness_ms
+              << " encoder_cpb_lateness_ms=" << encoder_cpb_lateness_ms
+              << " packet_lateness_ms=" << stats.maximum_packet_lateness_ns / 1'000'000.0
+              << " send_jitter_ms=" << stats.maximum_send_jitter_ns / 1'000'000.0
+              << " late_packets=" << stats.late_packets
+              << " cpb_max_bytes=" << stats.maximum_cpb_occupancy_bytes
+              << " cmax=" << stats.configured_cmax << " cinst_max=" << stats.maximum_cinst_observed
+              << " ncm_violations=" << stats.ncm_violations
+              << " mmcss=" << (stats.mmcss_registered ? "Distribution" : "UNAVAILABLE")
+              << " high_res_timer=" << (stats.high_resolution_timer ? "yes" : "fallback")
+              << " timing=" << (timing_compliant && shaper_compliant ? "PASS" : "FAIL")
               << " missing_picture_timing=" << encoder.missing_picture_timing_count()
               << " incomplete_recovery=" << encoder.incomplete_recovery_point_count() << '\n';
-    return options.require_timing_compliance &&
-                   (!timing_compliant || encoder.missing_picture_timing_count() != 0U ||
-                    encoder.incomplete_recovery_point_count() != 0U)
+    if (!options.metrics_csv.empty())
+      ipmx::sender::write_transmitter_metrics_csv(options.metrics_csv, stats, session_timing);
+    if (!options.metrics_json.empty())
+      ipmx::sender::write_transmitter_metrics_json(options.metrics_json, stats, session_timing);
+    return options.require_timing_compliance && (!timing_compliant || !shaper_compliant ||
+                                                 encoder.missing_picture_timing_count() != 0U ||
+                                                 encoder.incomplete_recovery_point_count() != 0U)
                ? 2
                : 0;
   } catch (const std::exception& error) {

@@ -3,11 +3,12 @@ find_package(X264 REQUIRED)
 add_library(ipmx_sender_codec STATIC
   src/x264_encoder.cpp
   src/frame_transmitter.cpp
+  src/metrics_export.cpp
 )
 add_library(ipmx::sender_codec ALIAS ipmx_sender_codec)
 target_include_directories(ipmx_sender_codec PUBLIC include)
 target_link_libraries(ipmx_sender_codec PUBLIC ipmx::core X264::X264
-  PRIVATE ipmx::project_options ipmx::project_warnings avrt winmm)
+  PRIVATE ipmx::project_options ipmx::project_warnings avrt)
 
 add_executable(ipmx_sender
   src/main.cpp

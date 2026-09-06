@@ -1,6 +1,7 @@
 #pragma once
 
-#include <chrono>
+#include "ipmx/timing.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -44,10 +45,7 @@ struct DecodedFrame {
   std::vector<uint8_t> pixels;
 };
 
-[[nodiscard]] inline uint64_t steady_now_ns() noexcept {
-  using namespace std::chrono;
-  return static_cast<uint64_t>(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
-}
+[[nodiscard]] inline uint64_t steady_now_ns() noexcept { return qpc_now_ns(); }
 
 } // namespace v0
 } // namespace ipmx

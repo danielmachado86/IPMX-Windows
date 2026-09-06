@@ -1,11 +1,13 @@
+// clang-format off: winsock2 must precede Windows networking headers.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+// clang-format on
 
 #include "ipmx/udp_multicast.hpp"
 
-#include <limits>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -65,11 +67,40 @@ private:
 
 } // namespace
 
+std::string resolve_ipv4_source_address(const std::string& destination_address,
+                                        const uint16_t destination_port,
+                                        const std::string interface_address) {
+  const in_addr requested = parse_ipv4(interface_address);
+  if (requested.s_addr != htonl(INADDR_ANY))
+    return interface_address;
+
+  WinsockRuntime winsock;
+  SocketHandle socket;
+  sockaddr_in destination{};
+  destination.sin_family = AF_INET;
+  destination.sin_port = htons(destination_port);
+  destination.sin_addr = parse_ipv4(destination_address);
+  if (connect(socket.get(), reinterpret_cast<const sockaddr*>(&destination), sizeof(destination)) ==
+      SOCKET_ERROR) {
+    throw_winsock("cannot resolve multicast source interface");
+  }
+  sockaddr_in source{};
+  int source_size = sizeof(source);
+  if (getsockname(socket.get(), reinterpret_cast<sockaddr*>(&source), &source_size) ==
+      SOCKET_ERROR) {
+    throw_winsock("cannot read multicast source interface");
+  }
+  char text[INET_ADDRSTRLEN]{};
+  if (!InetNtopA(AF_INET, &source.sin_addr, text, static_cast<DWORD>(sizeof(text))))
+    throw_winsock("cannot format multicast source interface");
+  return text;
+}
+
 std::string local_mac_reference(const std::string interface_address) {
   const in_addr requested = parse_ipv4(interface_address);
   ULONG size = 0U;
-  constexpr ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                          GAA_FLAG_SKIP_DNS_SERVER;
+  constexpr ULONG flags =
+      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
   if (GetAdaptersAddresses(AF_INET, flags, nullptr, nullptr, &size) != ERROR_BUFFER_OVERFLOW)
     throw std::runtime_error("cannot enumerate network interfaces");
   std::vector<uint8_t> storage(size);
@@ -119,20 +150,27 @@ struct MulticastReceiver::State {
 };
 
 MulticastSender::MulticastSender(std::string group, const uint16_t port,
-                                 std::string interface_address)
+                                 std::string interface_address, const uint8_t dscp)
     : state_(std::make_unique<State>()) {
+  if (dscp > 63U)
+    throw std::invalid_argument("DSCP must be in the range 0..63");
   const BOOL loopback = TRUE;
   const int ttl = 1;
+  const int traffic_class = static_cast<int>(dscp) << 2;
   if (setsockopt(state_->socket.get(), IPPROTO_IP, IP_MULTICAST_LOOP,
                  reinterpret_cast<const char*>(&loopback), sizeof(loopback)) == SOCKET_ERROR ||
       setsockopt(state_->socket.get(), IPPROTO_IP, IP_MULTICAST_TTL,
-                 reinterpret_cast<const char*>(&ttl), sizeof(ttl)) == SOCKET_ERROR) {
+                 reinterpret_cast<const char*>(&ttl), sizeof(ttl)) == SOCKET_ERROR ||
+      setsockopt(state_->socket.get(), IPPROTO_IP, IP_TOS,
+                 reinterpret_cast<const char*>(&traffic_class),
+                 sizeof(traffic_class)) == SOCKET_ERROR) {
     throw_winsock("multicast sender option failed");
   }
 
   const in_addr interface_ip = parse_ipv4(interface_address);
   if (setsockopt(state_->socket.get(), IPPROTO_IP, IP_MULTICAST_IF,
-                 reinterpret_cast<const char*>(&interface_ip), sizeof(interface_ip)) == SOCKET_ERROR) {
+                 reinterpret_cast<const char*>(&interface_ip),
+                 sizeof(interface_ip)) == SOCKET_ERROR) {
     throw_winsock("IP_MULTICAST_IF failed");
   }
 
@@ -147,10 +185,10 @@ void MulticastSender::send(const std::span<const uint8_t> datagram) const {
   if (datagram.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
     throw std::length_error("datagram is too large");
   }
-  const int sent = sendto(state_->socket.get(), reinterpret_cast<const char*>(datagram.data()),
-                          static_cast<int>(datagram.size()), 0,
-                          reinterpret_cast<const sockaddr*>(&state_->destination),
-                          sizeof(state_->destination));
+  const int sent =
+      sendto(state_->socket.get(), reinterpret_cast<const char*>(datagram.data()),
+             static_cast<int>(datagram.size()), 0,
+             reinterpret_cast<const sockaddr*>(&state_->destination), sizeof(state_->destination));
   if (sent != static_cast<int>(datagram.size())) {
     throw_winsock("sendto failed");
   }
@@ -193,7 +231,7 @@ MulticastReceiver::MulticastReceiver(std::string group, const uint16_t port,
 MulticastReceiver::~MulticastReceiver() = default;
 
 std::optional<size_t> MulticastReceiver::receive(const std::span<uint8_t> storage,
-                                                  const int timeout_ms) const {
+                                                 const int timeout_ms) const {
   if (storage.empty() || storage.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
       timeout_ms < 0) {
     throw std::invalid_argument("invalid multicast receive buffer or timeout");
