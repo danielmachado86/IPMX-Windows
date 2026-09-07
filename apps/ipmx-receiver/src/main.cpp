@@ -41,6 +41,7 @@ struct Options {
   uint32_t fps_denominator{1U};
   uint32_t duration_seconds{};
   uint32_t maximum_latency_ms{250U};
+  bool local_clock{};
   bool require_zero_loss{};
   std::filesystem::path sdp;
 };
@@ -81,10 +82,14 @@ template <typename T>
   }
   for (int index = 1; index < argc; ++index) {
     const std::string_view key(argv[index]);
+    if (key == "--local-clock") {
+      options.local_clock = true;
+      continue;
+    }
     if (key == "--help") {
       std::cout << "ipmx-receiver [--width N] [--height N] [--fps N] [--group A.B.C.D] "
                    "[--port N] [--interface A.B.C.D] [--sdp PATH] [--duration-seconds N] "
-                   "[--max-latency-ms N] [--require-zero-loss]\n";
+                   "[--local-clock] [--max-latency-ms N] [--require-zero-loss]\n";
       std::exit(0);
     }
     if (key == "--require-zero-loss") {
@@ -197,13 +202,14 @@ int main(const int argc, char** argv) {
               for (const auto& frame :
                    decoder.decode(access_unit->annex_b, access_unit->capture_time_ns)) {
                 const uint64_t ready_time = ipmx::steady_now_ns();
-                if (frame.capture_time_ns != 0U && ready_time >= frame.capture_time_ns &&
+                if (options.local_clock && frame.capture_time_ns != 0U && ready_time >= frame.capture_time_ns &&
                     ready_time - frame.capture_time_ns > maximum_latency_ns) {
+                  latency.observe_ns(ready_time - frame.capture_time_ns);
                   ++late_frames;
                   continue;
                 }
                 const uint64_t presented = renderer.present(frame);
-                if (frame.capture_time_ns != 0U && presented >= frame.capture_time_ns) {
+                if (options.local_clock && frame.capture_time_ns != 0U && presented >= frame.capture_time_ns) {
                   latency.observe_ns(presented - frame.capture_time_ns);
                 }
                 ++decoded_frames;
@@ -221,7 +227,9 @@ int main(const int argc, char** argv) {
 
     print_stats(sequence.stats(), access_units, decoded_frames, late_frames, invalid_packets,
                 latency);
-    const bool clean = sequence.stats().lost == 0U && sequence.stats().reordered == 0U &&
+    std::cout << "latency_domain=" << (options.local_clock ? "local-QPC" : "UNVERIFIABLE")
+              << " presentation_event=graphics-call-completion\n";
+    const bool clean = options.local_clock && sequence.stats().lost == 0U && sequence.stats().reordered == 0U &&
                        invalid_packets == 0U && late_frames == 0U && decoded_frames > 0U &&
                        latency.count() > 0U &&
                        latency.maximum_ms() <= static_cast<double>(options.maximum_latency_ms);

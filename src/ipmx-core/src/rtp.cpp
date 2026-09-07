@@ -104,6 +104,30 @@ std::vector<std::vector<uint8_t>> RtpPacketizer::packetize(const std::vector<Nal
     if (nal.empty()) {
       continue;
     }
+    // Aggregate adjacent small NALs without reordering them (STAP-A).
+    size_t end = nal_index;
+    size_t aggregate_bytes = 1U;
+    uint8_t nri = 0U;
+    while (end < nals.size() && !nals[end].empty() &&
+           nals[end].size() <= 65535U &&
+           aggregate_bytes + 2U + nals[end].size() <= maximum_payload) {
+      aggregate_bytes += 2U + nals[end].size();
+      nri = std::max(nri, static_cast<uint8_t>(nals[end].front() & 0x60U));
+      ++end;
+    }
+    if (end > nal_index + 1U) {
+      std::vector<uint8_t> aggregate;
+      aggregate.reserve(aggregate_bytes);
+      aggregate.push_back(static_cast<uint8_t>(nri | 24U));
+      for (size_t i = nal_index; i < end; ++i) {
+        aggregate.push_back(static_cast<uint8_t>(nals[i].size() >> 8U));
+        aggregate.push_back(static_cast<uint8_t>(nals[i].size()));
+        aggregate.insert(aggregate.end(), nals[i].begin(), nals[i].end());
+      }
+      packets.push_back(make_packet(aggregate, timestamp, capture_time_ns, end == nals.size()));
+      nal_index = end - 1U;
+      continue;
+    }
     const bool final_nal = nal_index + 1U == nals.size();
     if (nal.size() <= maximum_payload) {
       packets.push_back(make_packet(nal, timestamp, capture_time_ns, final_nal));
@@ -253,6 +277,30 @@ std::optional<CompletedAccessUnit> H264Depacketizer::push(const ParsedRtpPacket&
       nals_.emplace_back(packet.payload.begin(), packet.payload.end());
       accumulated_bytes_ += packet.payload.size();
     }
+  } else if (nal_type == 24U) {
+    if (fragmented_) {
+      damaged_ = true;
+      fragment_.clear();
+      fragmented_ = false;
+    }
+    size_t offset = 1U;
+    if (packet.payload.size() == 1U) damaged_ = true;
+    while (offset < packet.payload.size()) {
+      if (packet.payload.size() - offset < 2U) { damaged_ = true; break; }
+      const size_t length = read_u16(packet.payload, offset);
+      offset += 2U;
+      if (length == 0U || length > packet.payload.size() - offset ||
+          nals_.size() >= kMaximumNalsPerAccessUnit ||
+          accumulated_bytes_ > kMaximumAccessUnitBytes - length) {
+        damaged_ = true; break;
+      }
+      const auto type = packet.payload[offset] & 0x1FU;
+      if (type == 0U || type >= 24U) { damaged_ = true; break; }
+      const auto begin = packet.payload.begin() + static_cast<std::ptrdiff_t>(offset);
+      nals_.emplace_back(begin, begin + static_cast<std::ptrdiff_t>(length));
+      accumulated_bytes_ += length;
+      offset += length;
+    }
   } else if (nal_type == 28U && packet.payload.size() >= 2U) {
     const bool start = (packet.payload[1] & 0x80U) != 0U;
     const bool end = (packet.payload[1] & 0x40U) != 0U;
@@ -294,7 +342,7 @@ std::optional<CompletedAccessUnit> H264Depacketizer::push(const ParsedRtpPacket&
       fragmented_ = false;
     }
   } else {
-    damaged_ = true; // This depacketizer supports only Single NAL and FU-A.
+    damaged_ = true; // Unsupported aggregation/fragmentation mode.
   }
 
   if (!packet.marker) {

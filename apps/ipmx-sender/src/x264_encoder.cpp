@@ -15,6 +15,7 @@ struct X264Encoder::State {
   EncoderSettings settings{};
   uint64_t missing_picture_timing_count{};
   uint64_t incomplete_recovery_point_count{};
+  int64_t previous_pts{-1};
   bool warned_picture_timing{};
   bool warned_recovery_point{};
 
@@ -51,6 +52,7 @@ X264Encoder::X264Encoder(const EncoderSettings& settings) : state_(std::make_uni
   if (x264_param_default_preset(&parameters, "veryfast", "zerolatency") != 0) {
     throw std::runtime_error("x264_param_default_preset failed");
   }
+  parameters.i_threads = 2;
   parameters.i_width = static_cast<int>(settings.width);
   parameters.i_height = static_cast<int>(settings.height);
   parameters.i_csp = X264_CSP_NV12;
@@ -151,6 +153,9 @@ EncodedAccessUnit X264Encoder::encode(const Nv12Frame& frame, const int64_t pts)
   input.img.i_stride[0] = static_cast<int>(frame.y_stride);
   input.img.i_stride[1] = static_cast<int>(frame.uv_stride);
   input.i_pts = pts;
+  if (state_->previous_pts >= 0 && pts != state_->previous_pts + 1)
+    input.i_type = X264_TYPE_IDR;
+  state_->previous_pts = pts;
   input.i_pic_struct = PIC_STRUCT_PROGRESSIVE;
 
   x264_picture_t output{};

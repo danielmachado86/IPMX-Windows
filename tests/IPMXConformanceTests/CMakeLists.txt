@@ -2,6 +2,7 @@ find_package(X264 REQUIRED)
 
 add_executable(ipmx_conformance_tests
   conformance_tests.cpp
+  ${CMAKE_SOURCE_DIR}/apps/ipmx-sender/src/test_pattern.cpp
 )
 target_include_directories(ipmx_conformance_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/apps/ipmx-sender/include

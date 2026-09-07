@@ -14,6 +14,9 @@ struct BgraFrame {
   uint32_t height{};
   uint32_t stride{};
   uint64_t capture_time_ns{};
+  uint64_t nominal_time_ns{};
+  uint64_t frame_index{};
+  uint64_t skipped_intervals{};
   bool repeated{};
   std::vector<uint8_t> pixels;
 };

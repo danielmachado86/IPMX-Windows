@@ -111,6 +111,7 @@ try {
         "--dump-pcap", $pcapPath,
         "--metrics-csv", $metricsCsv,
         "--metrics-json", $metricsJson,
+        "--production-csv", (Join-Path $outputDirectory "production.csv"),
         "--require-timing-compliance"
     )
     $sender = Start-Process -FilePath $senderPath -ArgumentList $senderArguments `
@@ -129,7 +130,7 @@ try {
         "--sdp", $sdpPath,
         "--duration-seconds", ($DurationSeconds + 5),
         "--max-latency-ms", $MaximumLatencyMs,
-        "--require-zero-loss"
+        "--local-clock", "--require-zero-loss"
     ) -RedirectStandardOutput $receiverLog -RedirectStandardError $receiverError `
         -WindowStyle Hidden -PassThru
 
@@ -192,4 +193,9 @@ finally {
             Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
         }
     }
+    Get-ChildItem -LiteralPath $outputDirectory -File |
+        Where-Object { $_.Name -ne 'hashes.json' } |
+        Get-FileHash -Algorithm SHA256 | Select-Object Path, Hash |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputDirectory 'hashes.json')
+
 }

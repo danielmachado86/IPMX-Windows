@@ -52,6 +52,7 @@ struct Options {
   std::filesystem::path dump_pcap;
   std::filesystem::path metrics_csv;
   std::filesystem::path metrics_json;
+  std::filesystem::path production_csv;
   std::string ts_refclk;
   std::optional<uint64_t> encoder_delay_ns;
   std::optional<uint64_t> sender_reports_delay_ns;
@@ -85,7 +86,7 @@ template <typename T>
     const std::string_view key(argv[index]);
     if (key == "--help") {
       std::cout << "ipmx-sender [--source test|stress|screen] [--width N] [--height N] "
-                   "[--fps N] [--bitrate-kbps N] [--profile main|high] [--max-ip-bitrate-kbps N] "
+                   "[--fps N] [--fps-denominator N] [--production-csv PATH] [--bitrate-kbps N] [--profile main|high] [--max-ip-bitrate-kbps N] "
                    "[--group A.B.C.D] [--port N] [--interface A.B.C.D] [--maxudp N] "
                    "[--ts-refclk VALUE] [--encoder-delay-us N] [--sender-reports-delay-us N] "
                    "[--access-unit-offset-us N] [--duration-seconds N] [--sdp PATH] "
@@ -108,6 +109,10 @@ template <typename T>
       options.width = parse_number<uint32_t>(value, "--width");
     else if (key == "--height")
       options.height = parse_number<uint32_t>(value, "--height");
+    else if (key == "--production-csv")
+      options.production_csv = value;
+    else if (key == "--fps-denominator")
+      options.fps_denominator = parse_number<uint32_t>(value, "--fps-denominator");
     else if (key == "--fps")
       options.fps_numerator = parse_number<uint32_t>(value, "--fps");
     else if (key == "--bitrate-kbps")
@@ -263,6 +268,14 @@ int main(const int argc, char** argv) {
               << " access_unit_offset_ms=" << session_timing.access_unit_offset_ns / 1'000'000.0
               << '\n';
 
+    std::ofstream production;
+    if (!options.production_csv.empty()) {
+      production.open(options.production_csv);
+      if (!production) throw std::runtime_error("cannot open production CSV");
+      production << "frame_index,nominal_ns,acquisition_ns,source_begin_ns,source_end_ns,conversion_end_ns,encode_end_ns,packetize_end_ns,enqueue_end_ns,au_bytes,skipped_intervals,encode_deadline_missed\n";
+    }
+    uint64_t skipped_intervals = 0U;
+    uint64_t encode_deadline_misses = 0U;
     ipmx::BgraFrame bgra;
     std::optional<ipmx::Nv12Frame> cached_nv12;
     while (running) {
@@ -271,16 +284,28 @@ int main(const int argc, char** argv) {
           now - started >= std::chrono::seconds(options.duration_seconds)) {
         break;
       }
+      const auto source_begin = ipmx::steady_now_ns();
       if (!source->next(bgra)) {
         continue;
       }
+      const auto source_end = ipmx::steady_now_ns();
+      skipped_intervals += bgra.skipped_intervals;
+      const auto media_index = options.source == "screen" ? frame_index : bgra.frame_index;
+      const auto nominal = bgra.nominal_time_ns != 0U ? bgra.nominal_time_ns : bgra.capture_time_ns;
       if (!bgra.repeated) {
-        cached_nv12 = ipmx::bgra_to_nv12(bgra);
+        if (!cached_nv12) cached_nv12.emplace();
+        ipmx::bgra_to_nv12(bgra, *cached_nv12);
       } else if (!cached_nv12) {
         continue;
       }
       cached_nv12->capture_time_ns = bgra.capture_time_ns;
-      auto access_unit = encoder.encode(*cached_nv12, static_cast<int64_t>(frame_index));
+      const auto conversion_end = ipmx::steady_now_ns();
+      auto access_unit = encoder.encode(*cached_nv12, static_cast<int64_t>(media_index));
+      const auto encode_end = ipmx::steady_now_ns();
+      const bool deadline_missed = encode_end > nominal + session_timing.encoder_delay_ns;
+      encode_deadline_misses += deadline_missed ? 1U : 0U;
+      size_t au_bytes = 0U;
+      for (const auto& nal : access_unit.nals) au_bytes += nal.size();
       if (bitstream.is_open() && !access_unit.nals.empty()) {
         const auto annex_b = ipmx::build_annex_b(access_unit.nals);
         bitstream.write(reinterpret_cast<const char*>(annex_b.data()),
@@ -289,10 +314,18 @@ int main(const int argc, char** argv) {
           throw std::runtime_error("cannot write H.264 dump file");
       }
       const uint32_t timestamp = ipmx::rtp_timestamp_for_frame(
-          initial_timestamp, frame_index, options.fps_numerator, options.fps_denominator);
-      transmitter.enqueue(
-          {timestamp, cached_nv12->capture_time_ns,
-           packetizer.packetize(access_unit.nals, timestamp, cached_nv12->capture_time_ns)});
+          initial_timestamp, media_index, options.fps_numerator, options.fps_denominator);
+      auto packets = packetizer.packetize(access_unit.nals, timestamp, cached_nv12->capture_time_ns);
+      const auto packetize_end = ipmx::steady_now_ns();
+      transmitter.enqueue({timestamp, cached_nv12->capture_time_ns, std::move(packets), nominal});
+      const auto enqueue_end = ipmx::steady_now_ns();
+      if (production.is_open()) {
+        production << media_index << ',' << nominal << ',' << bgra.capture_time_ns << ','
+                   << source_begin << ',' << source_end << ',' << conversion_end << ','
+                   << encode_end << ',' << packetize_end << ',' << enqueue_end << ','
+                   << au_bytes << ',' << bgra.skipped_intervals << ',' << deadline_missed << '\n';
+        if (!production) throw std::runtime_error("cannot write production CSV");
+      }
       ++frame_index;
 
       if (now - last_report >= std::chrono::seconds(1)) {
@@ -306,13 +339,17 @@ int main(const int argc, char** argv) {
       }
     }
     transmitter.close();
-    const auto stats = transmitter.stats();
+    auto stats = transmitter.stats();
+    stats.skipped_intervals = skipped_intervals;
+    stats.encode_deadline_misses = encode_deadline_misses;
     const double jitter_ms = static_cast<double>(stats.maximum_interval_spread_ns) / 1'000'000.0;
     const double sender_report_lateness_ms =
         static_cast<double>(stats.maximum_sender_report_lateness_ns) / 1'000'000.0;
     const double encoder_cpb_lateness_ms =
         static_cast<double>(stats.maximum_encoder_cpb_lateness_ns) / 1'000'000.0;
-    const bool timing_compliant = stats.timing_window_observed && jitter_ms <= 2.0;
+    const bool timing_compliant = stats.timing_window_observed && jitter_ms <= 2.0 &&
+                                  skipped_intervals == 0U && encode_deadline_misses == 0U &&
+                                  stats.maximum_sr_interval_spread_ns <= 2'000'000U;
     const bool shaper_compliant = stats.ncm_violations == 0U && stats.late_packets == 0U &&
                                   stats.maximum_cinst_observed <= stats.configured_cmax;
     std::cout << "Sender stopped: frames=" << frame_index << " sent=" << stats.frames
@@ -329,6 +366,8 @@ int main(const int argc, char** argv) {
               << " mmcss=" << (stats.mmcss_registered ? "Distribution" : "UNAVAILABLE")
               << " high_res_timer=" << (stats.high_resolution_timer ? "yes" : "fallback")
               << " timing=" << (timing_compliant && shaper_compliant ? "PASS" : "FAIL")
+              << " skipped_intervals=" << skipped_intervals
+              << " encode_deadline_misses=" << encode_deadline_misses
               << " missing_picture_timing=" << encoder.missing_picture_timing_count()
               << " incomplete_recovery=" << encoder.incomplete_recovery_point_count() << '\n';
     if (!options.metrics_csv.empty())

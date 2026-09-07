@@ -131,6 +131,10 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
       NetworkCompatibilityTracker network_compatibility(shaper.maximum_packets_per_second(),
                                                         shaper.cmax());
       FrameIntervalTracker intervals;
+      FrameIntervalTracker sr_intervals;
+      uint64_t minimum_sr_rtp_gap_ns = std::numeric_limits<uint64_t>::max();
+      uint64_t maximum_sr_send_duration_ns = 0U;
+      uint64_t maximum_rtp_send_duration_ns = 0U;
       std::unique_ptr<AsyncPcapRtpWriter> pcap;
       if (!state->settings.pcap_path.empty()) {
         const std::string source = state->settings.interface_address == "0.0.0.0"
@@ -169,6 +173,10 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
       bool rtp_clock_aligned{};
       const auto update_stats = [&] {
         std::lock_guard lock(state->mutex);
+        state->stats.maximum_sr_interval_spread_ns = sr_intervals.maximum_interval_spread_ns();
+        state->stats.minimum_sr_rtp_gap_ns = minimum_sr_rtp_gap_ns == std::numeric_limits<uint64_t>::max() ? 0U : minimum_sr_rtp_gap_ns;
+        state->stats.maximum_sr_send_duration_ns = maximum_sr_send_duration_ns;
+        state->stats.maximum_rtp_send_duration_ns = maximum_rtp_send_duration_ns;
         state->stats.frames = frame_count;
         state->stats.packets = packet_count;
         state->stats.rtp_payload_octets = payload_octets;
@@ -211,10 +219,10 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
         const uint64_t capture_time_ns =
             frame.capture_time_ns != 0U ? frame.capture_time_ns : qpc_now_ns();
         const auto schedule = make_ipmx_frame_schedule(
-            capture_time_ns, state->timing.encoder_delay_ns, state->timing.sender_reports_delay_ns,
+            frame.nominal_time_ns != 0U ? frame.nominal_time_ns : capture_time_ns, state->timing.encoder_delay_ns, state->timing.sender_reports_delay_ns,
             state->timing.access_unit_offset_ns);
 
-        const uint64_t wall_ns = to_unix_ns(capture_time_ns);
+        const uint64_t wall_ns = to_unix_ns(frame.nominal_time_ns != 0U ? frame.nominal_time_ns : capture_time_ns);
         if (!rtp_clock_aligned) {
           const uint64_t wall_seconds = wall_ns / 1'000'000'000U;
           const uint64_t wall_nanoseconds = wall_ns % 1'000'000'000U;
@@ -255,6 +263,9 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
                          ? sender_report_actual_ns - schedule.sender_report_time_ns
                          : 0U);
         rtcp_network.send(compound);
+        const uint64_t sender_report_completed_ns = qpc_now_ns();
+        sr_intervals.observe(sender_report_actual_ns);
+        maximum_sr_send_duration_ns = std::max(maximum_sr_send_duration_ns, sender_report_completed_ns - sender_report_actual_ns);
         if (pcap) {
           const uint16_t rtcp_port = reserved_rtcp_port(state->settings.media_port);
           pcap->enqueue(compound, to_unix_ns(sender_report_actual_ns), rtcp_port, rtcp_port);
@@ -283,7 +294,8 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
         bool first_packet = true;
         for (auto& packet : frame.rtp_packets) {
           const uint64_t scheduled = shaper.schedule_ns(
-              first_packet ? std::max(schedule.first_rtp_time_ns, qpc_now_ns()) : qpc_now_ns(),
+              first_packet ? std::max({schedule.first_rtp_time_ns, qpc_now_ns(),
+                                      sender_report_completed_ns + state->timing.access_unit_offset_ns}) : qpc_now_ns(),
               packet.size());
           waiter.wait_until(scheduled);
           const uint64_t actual = qpc_now_ns();
@@ -302,12 +314,15 @@ FrameTransmitter::FrameTransmitter(FrameTransmitterSettings settings)
           }
           previous_packet_actual_ns = actual;
           previous_packet_scheduled_ns = scheduled;
-          if (first_packet)
+          if (first_packet) {
             intervals.observe(actual);
+            minimum_sr_rtp_gap_ns = std::min(minimum_sr_rtp_gap_ns, actual - sender_report_completed_ns);
+          }
           network_compatibility.observe(actual);
           if (const auto parsed = parse_rtp_packet(packet))
             payload_octets += parsed->payload.size();
           rtp_network.send(packet);
+          maximum_rtp_send_duration_ns = std::max(maximum_rtp_send_duration_ns, qpc_now_ns() - actual);
           ++packet_count;
           if (pcap)
             pcap->enqueue(std::move(packet), to_unix_ns(actual), state->settings.media_port,

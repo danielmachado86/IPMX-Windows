@@ -1,3 +1,5 @@
+#include "ipmx/sender/frame_source.hpp"
+#include "ipmx/frame_timeline.hpp"
 #include "ipmx/annexb.hpp"
 #include "ipmx/h264.hpp"
 #include "ipmx/receiver/mf_h264_decoder.hpp"
@@ -224,6 +226,8 @@ void test_live_x264_contract() {
     require(picture_timing, "every live access unit has Picture Timing SEI");
     keyframes += access_unit.keyframe ? 1U : 0U;
   }
+  const auto recovered = encoder.encode(frame, static_cast<int64_t>(fps) + 60);
+  require(recovered.keyframe && recovered.recovery_point_complete, "PTS gap forces complete IDR");
   require(keyframes >= 2U, "live x264 produces recovery point at most every second");
 }
 
@@ -260,6 +264,29 @@ void test_receiver_main_and_high_profiles() {
 
 int main() {
   try {
+    for (const auto denominator : {1U, 1001U}) {
+      const uint32_t numerator = denominator == 1U ? 60U : 60000U;
+      const auto slot = ipmx::select_frame_slot(100U, 1'000'000'100ULL, 1U, numerator, denominator);
+      require(slot.skipped == slot.index - 1U, "overload counts all missing slots");
+      require(slot.nominal_ns <= 1'000'000'100ULL, "latest slot is not in future");
+      require(1'000'000'100ULL - slot.nominal_ns < 16'683'334ULL, "age is bounded by a period");
+      const auto recovered = ipmx::select_frame_slot(100U, slot.nominal_ns, slot.index + 1U, numerator, denominator);
+      require(recovered.index == slot.index + 1U && recovered.skipped == 0U, "recovery preserves timeline");
+    }
+    auto stress = ipmx::sender::make_test_pattern_source(32U, 18U, 60U, 1U, true);
+    ipmx::BgraFrame texture;
+    require(stress->next(texture), "stress source produces a frame");
+    require(texture.capture_time_ns >= texture.nominal_time_ns, "actual acquisition follows nominal time");
+    for (uint32_t y = 0; y < texture.height; ++y) {
+      for (uint32_t x = 0; x < texture.width; ++x) {
+        uint32_t noise = x + y * texture.width + static_cast<uint32_t>(texture.frame_index) * 0x9E3779B9U;
+        noise ^= noise >> 16U; noise *= 0x7FEB352DU; noise ^= noise >> 15U;
+        const size_t offset = static_cast<size_t>(y) * texture.stride + x * 4U;
+        for (uint32_t c = 0; c < 3U; ++c)
+          require(texture.pixels[offset+c] == static_cast<uint8_t>(noise >> (c*8U)), "stress pixels unchanged");
+        require(texture.pixels[offset+3U] == 255U, "stress alpha preserved");
+      }
+    }
     test_golden_bitstream();
     test_golden_pcap();
     test_h264_sender_report_schedule();

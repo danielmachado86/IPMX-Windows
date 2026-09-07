@@ -37,9 +37,16 @@ struct TransmitFrame {
   uint32_t rtp_timestamp{};
   uint64_t capture_time_ns{};
   std::vector<std::vector<uint8_t>> rtp_packets;
+  uint64_t nominal_time_ns{};
 };
 
 struct FrameTransmitterStats {
+  uint64_t skipped_intervals{};
+  uint64_t encode_deadline_misses{};
+  uint64_t maximum_sr_interval_spread_ns{};
+  uint64_t minimum_sr_rtp_gap_ns{};
+  uint64_t maximum_sr_send_duration_ns{};
+  uint64_t maximum_rtp_send_duration_ns{};
   uint64_t frames{};
   uint64_t packets{};
   uint64_t rtp_payload_octets{};

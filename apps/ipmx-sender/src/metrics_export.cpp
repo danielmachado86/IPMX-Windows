@@ -48,6 +48,12 @@ void write_transmitter_metrics_json(const std::filesystem::path& path,
                                     const IpmxSessionTiming& timing) {
   auto output = open_metrics_file(path);
   output << "{\n"
+         << "  \"skipped_intervals\": " << s.skipped_intervals << ",\n"
+         << "  \"encode_deadline_misses\": " << s.encode_deadline_misses << ",\n"
+         << "  \"maximum_sr_interval_spread_ns\": " << s.maximum_sr_interval_spread_ns << ",\n"
+         << "  \"minimum_sr_rtp_gap_ns\": " << s.minimum_sr_rtp_gap_ns << ",\n"
+         << "  \"maximum_sr_send_duration_ns\": " << s.maximum_sr_send_duration_ns << ",\n"
+         << "  \"maximum_rtp_send_duration_ns\": " << s.maximum_rtp_send_duration_ns << ",\n"
          << "  \"frames\": " << s.frames << ",\n"
          << "  \"packets\": " << s.packets << ",\n"
          << "  \"rtcp_reports\": " << s.rtcp_reports << ",\n"

@@ -92,6 +92,18 @@ void test_bgra_to_nv12() {
     white.pixels[offset + 1U] = 255U;
     white.pixels[offset + 2U] = 255U;
   }
+  // Mixed colors verify chroma averaging and the fused luma pass, including padded stride.
+  ipmx::BgraFrame mixed;
+  mixed.width = 2U; mixed.height = 2U; mixed.stride = 12U;
+  mixed.pixels = {0,0,255,255, 0,255,0,255, 99,99,99,99,
+                  255,0,0,255, 255,255,255,255, 99,99,99,99};
+  ipmx::Nv12Frame reused;
+  ipmx::bgra_to_nv12(mixed, reused);
+  require(reused.pixels == std::vector<uint8_t>({63,172,32,235,128,128}),
+          "mixed padded BGRA conversion preserves BT.709 and chroma averages");
+  const auto* buffer = reused.pixels.data();
+  ipmx::bgra_to_nv12(mixed, reused);
+  require(reused.pixels.data() == buffer, "conversion reuses storage");
   const auto white_nv12 = ipmx::bgra_to_nv12(white);
   require(white_nv12.pixels == std::vector<uint8_t>({235, 235, 235, 235, 128, 128}),
           "white BGRA to NV12");
@@ -104,9 +116,10 @@ void test_rtp_single_and_fu_a() {
   for (size_t index = 1U; index < large.size(); ++index) {
     large[index] = static_cast<uint8_t>(index);
   }
-  const std::vector<ipmx::NalUnit> original{small, large};
+  const std::vector<ipmx::NalUnit> original{small, small, large, small, small};
   ipmx::RtpPacketizer packetizer(100U, ipmx::kH264PayloadType, 42U);
   const auto datagrams = packetizer.packetize(original, 123456U, 9'876'543'210ULL);
+  require((ipmx::parse_rtp_packet(datagrams.front())->payload.front() & 0x1FU) == 24U, "small NALs aggregate into STAP-A");
   require(datagrams.size() > 2U, "FU-A must use multiple datagrams");
   require(std::ranges::all_of(datagrams, [](const auto& packet) { return packet.size() <= 100U; }),
           "RTP datagram MTU");
@@ -264,6 +277,14 @@ void test_malformed_rtp_packets() {
 }
 
 void test_depacketizer_damage_paths() {
+  for (const std::vector<uint8_t> payload : {std::vector<uint8_t>{24,0},
+       std::vector<uint8_t>{24,0,0}, std::vector<uint8_t>{24,0,4,1},
+       std::vector<uint8_t>{24,0,1,24}}) {
+    ipmx::H264Depacketizer bad;
+    ipmx::ParsedRtpPacket packet;
+    packet.timestamp = 1U; packet.marker = true; packet.payload = payload;
+    require(!bad.push(packet), "malformed STAP-A rejected");
+  }
   ipmx::H264Depacketizer depacketizer;
   const std::array<uint8_t, 3U> fu_start{0x7CU, 0x85U, 0x11U};
   const std::array<uint8_t, 3U> fu_end{0x7CU, 0x45U, 0x22U};

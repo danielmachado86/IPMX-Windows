@@ -35,7 +35,7 @@ if (-not (Test-Path -LiteralPath $sdpPath)) {
     throw "The sender did not create an SDP file within 15 seconds."
 }
 
-$receiverArguments = @("--sdp", $sdpPath)
+$receiverArguments = @("--sdp", $sdpPath, "--local-clock")
 if ($DurationSeconds -gt 0) {
     $receiverArguments += @("--duration-seconds", ($DurationSeconds + 2))
 }

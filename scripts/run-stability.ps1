@@ -87,7 +87,7 @@ try {
         "--sdp", $sdpPath,
         "--duration-seconds", ($DurationSeconds + 5),
         "--max-latency-ms", $MaximumLatencyMs,
-        "--require-zero-loss"
+        "--local-clock", "--require-zero-loss"
     )
     $receiver = Start-Process -FilePath $receiverPath -ArgumentList $receiverArguments `
         -RedirectStandardOutput $receiverLog -RedirectStandardError $receiverError `
